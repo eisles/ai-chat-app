@@ -30,7 +30,6 @@ import { useMemo, useState } from "react";
 
 export default function Home() {
   const { messages, sendMessage, stop, status, error } = useChat({
-    api: "/api/chat",
     initialMessages: [
       {
         id: "intro",
