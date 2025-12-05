@@ -30,7 +30,7 @@ import { useMemo, useState } from "react";
 
 export default function Home() {
   const { messages, sendMessage, stop, status, error } = useChat({
-    initialMessages: [
+    messages: [
       {
         id: "intro",
         role: "assistant",
