@@ -6,7 +6,7 @@ type Row = Record<string, unknown>;
 
 async function fetchRows() {
   const db = getDb();
-  const rows = await db<Row>`select * from product_images limit 100`;
+  const rows = (await db`select * from product_images limit 100`) as Row[];
 
   return rows;
 }
