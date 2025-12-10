@@ -22,6 +22,6 @@ export function getDb() {
 
 export async function pingDatabase() {
   const db = getDb();
-  const [row] = await db`select now() as now`;
-  return { now: row?.now };
+  const rows = (await db`select now() as now`) as Array<{ now: unknown }>;
+  return { now: rows[0]?.now };
 }
