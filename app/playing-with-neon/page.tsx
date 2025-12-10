@@ -6,7 +6,7 @@ type Row = Record<string, unknown>;
 
 async function fetchRows() {
   const db = getDb();
-  const rows = await db<Row>`select * from playing_with_neon limit 100`;
+  const rows = (await db`select * from playing_with_neon limit 100`) as Row[];
 
   const columnSet = rows.reduce<Set<string>>((set, row) => {
     Object.keys(row ?? {}).forEach((key) => set.add(key));
