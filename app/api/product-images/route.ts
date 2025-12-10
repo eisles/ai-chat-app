@@ -53,11 +53,8 @@ async function embedImage(imageUrl: string) {
   const extractor = await loadExtractor();
   let output: unknown;
   try {
-    // Ask pipeline to mean-pool CLS embedding.
-    output = (await extractor(tmpPath, {
-      pooling: "mean",
-      normalize: false,
-    })) as unknown;
+    // Use default pooling from the pipeline (CLIP returns a pooled embedding).
+    output = (await extractor(tmpPath)) as unknown;
   } finally {
     await fs.unlink(tmpPath).catch(() => {});
   }
