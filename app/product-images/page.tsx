@@ -40,7 +40,16 @@ export default function ProductImagesPage() {
         }),
       });
 
-      const data = (await res.json()) as ApiResult;
+      let data: ApiResult;
+      try {
+        data = (await res.json()) as ApiResult;
+      } catch {
+        // Vercel 上でレスポンスが空の場合のフォールバック
+        data = {
+          ok: false,
+          error: `Failed to parse response (status ${res.status})`,
+        };
+      }
       setResult(data);
     } catch (error) {
       setResult({
