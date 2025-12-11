@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import Link from "next/link";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -27,7 +28,31 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        {children}
+        <header className="border-b bg-background/80 backdrop-blur">
+          <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <span className="rounded bg-primary/10 px-2 py-1 text-primary">
+                AI Chat App
+              </span>
+              <span className="text-muted-foreground">Neon + AI</span>
+            </div>
+            <nav className="flex items-center gap-3 text-sm text-muted-foreground">
+              <Link className="hover:text-foreground" href="/">
+                Chat
+              </Link>
+              <Link className="hover:text-foreground" href="/product-images">
+                画像ベクトル化
+              </Link>
+              <Link className="hover:text-foreground" href="/product-images/list">
+                ベクトル一覧
+              </Link>
+              <Link className="hover:text-foreground" href="/playing-with-neon">
+                playing_with_neon
+              </Link>
+            </nav>
+          </div>
+        </header>
+        <main>{children}</main>
       </body>
     </html>
   );
