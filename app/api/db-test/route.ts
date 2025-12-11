@@ -3,7 +3,8 @@ import { getDb } from "@/lib/neon";
 export async function GET() {
   try {
     const db = getDb();
-    const [row] = await db`select now() as now`;
+    const rows = (await db`select now() as now`) as Array<{ now: unknown }>;
+    const row = rows[0];
 
     return Response.json({
       ok: true,
