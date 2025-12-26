@@ -12,12 +12,11 @@ const VECTORIZE_ENDPOINT = "https://convertvectorapi.onrender.com/vectorize";
 const TABLE_NAME = "public.product_images_vectorize";
 
 function generateUuidV7() {
-  const timeMs = BigInt(Date.now());
+  let timeMs = Date.now();
   const timeBytes = Buffer.alloc(6);
-  let remaining = timeMs;
   for (let i = 5; i >= 0; i -= 1) {
-    timeBytes[i] = Number(remaining & 0xffn);
-    remaining >>= 8n;
+    timeBytes[i] = timeMs % 256;
+    timeMs = Math.floor(timeMs / 256);
   }
 
   const randomBytesValue = randomBytes(10);
