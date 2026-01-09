@@ -285,7 +285,7 @@ interface EmbeddingService {
 
 **テーブル: product_text_embeddings**
 - 目的: 類似検索対象となる文字情報と埋め込みベクトルを保持する
-- 主な属性: id, product_id, text, embedding, metadata, model, dim
+- 主な属性: id, product_id, city_code, text, embedding, metadata, model, dim
 - 一意性: text_hash による重複防止
 - インデックス: product_id の BTree、embedding のベクトル検索用インデックス
 
@@ -299,6 +299,7 @@ interface EmbeddingService {
 create table if not exists product_text_embeddings (
   id uuid primary key,
   product_id varchar(20) not null,
+  city_code varchar(10),
   text text not null,
   embedding vector(1536) not null,
   embedding_length integer,

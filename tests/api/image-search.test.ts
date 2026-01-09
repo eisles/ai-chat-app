@@ -64,6 +64,7 @@ describe("POST /api/image-search", () => {
       {
         id: "id-1",
         productId: "p-1",
+        cityCode: null,
         text: "テスト",
         metadata: null,
         score: 0.91,

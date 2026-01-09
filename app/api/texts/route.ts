@@ -19,6 +19,7 @@ type TextRegistrationPayload = {
   text?: unknown;
   metadata?: unknown;
   productId?: unknown;
+  cityCode?: unknown;
 };
 
 function parseMetadata(value: unknown): TextMetadata | null {
@@ -42,6 +43,19 @@ function parseProductId(value: unknown) {
     return value.toString();
   }
   throw new ApiError("productId must be a string or number", 400);
+}
+
+function parseCityCode(value: unknown) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value.toString();
+  }
+  throw new ApiError("cityCode must be a string or number", 400);
 }
 
 function errorResponse(error: unknown) {
@@ -69,12 +83,19 @@ export async function POST(req: Request) {
 
     const metadata = parseMetadata(payload.metadata);
     const productId = parseProductId(payload.productId);
-    const result = await registerTextEntry({ text, metadata, productId });
+    const cityCode = parseCityCode(payload.cityCode);
+    const result = await registerTextEntry({
+      text,
+      metadata,
+      productId,
+      cityCode,
+    });
 
     return Response.json({
       ok: true,
       id: result.id,
       productId: result.productId,
+      cityCode: result.cityCode,
       status: result.status,
     });
   } catch (error) {

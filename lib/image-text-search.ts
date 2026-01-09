@@ -15,6 +15,7 @@ export type EmbeddingResult = {
 export type RegisteredText = {
   id: string;
   productId: string;
+  cityCode: string | null;
   textHash: string;
   status: "stored" | "skipped";
 };
@@ -22,6 +23,7 @@ export type RegisteredText = {
 export type SearchMatch = {
   id: string;
   productId: string;
+  cityCode: string | null;
   text: string;
   metadata: TextMetadata | null;
   score: number;
@@ -48,6 +50,7 @@ async function ensureTextEmbeddingsTable() {
     create table if not exists product_text_embeddings (
       id uuid primary key,
       product_id varchar(20) not null,
+      city_code varchar(10),
       text text not null,
       embedding vector(${TARGET_DIM}) not null,
       embedding_length integer,
@@ -61,6 +64,10 @@ async function ensureTextEmbeddingsTable() {
       created_at timestamptz default now(),
       updated_at timestamptz default now()
     );
+  `;
+  await db`
+    alter table product_text_embeddings
+    add column if not exists city_code varchar(10)
   `;
   await db`
     create unique index if not exists product_text_embeddings_product_id_idx
@@ -130,6 +137,7 @@ export async function registerTextEntry(options: {
   text: string;
   metadata: TextMetadata | null;
   productId?: string;
+  cityCode?: string;
 }): Promise<RegisteredText> {
   const db = await ensureTextEmbeddingsTable();
   const textHash = hashText(options.text);
@@ -145,6 +153,7 @@ export async function registerTextEntry(options: {
     return {
       id: existing[0]!.id,
       productId: existing[0]!.product_id,
+      cityCode: null,
       textHash,
       status: "skipped",
     };
@@ -162,6 +171,7 @@ export async function registerTextEntry(options: {
     insert into product_text_embeddings (
       id,
       product_id,
+      city_code,
       text,
       embedding,
       embedding_length,
@@ -176,6 +186,7 @@ export async function registerTextEntry(options: {
     values (
       ${id},
       ${productId},
+      ${options.cityCode ?? null},
       ${options.text},
       ${embeddingLiteral}::vector,
       ${embedding.vector.length},
@@ -197,6 +208,7 @@ export async function registerTextEntry(options: {
   return {
     id: rows[0]!.id,
     productId: rows[0]!.product_id,
+    cityCode: options.cityCode ?? null,
     textHash,
     status: "stored",
   };
@@ -214,6 +226,7 @@ export async function searchTextEmbeddings(options: {
     select
       id,
       product_id,
+      city_code,
       text,
       metadata,
       1 - (embedding <=> ${embeddingLiteral}::vector) as score
@@ -224,6 +237,7 @@ export async function searchTextEmbeddings(options: {
   `) as Array<{
     id: string;
     product_id: string;
+    city_code: string | null;
     text: string;
     metadata: TextMetadata | null;
     score: number;
@@ -232,6 +246,7 @@ export async function searchTextEmbeddings(options: {
   return rows.map((row) => ({
     id: row.id,
     productId: row.product_id,
+    cityCode: row.city_code ?? null,
     text: row.text,
     metadata: row.metadata ?? null,
     score: Number(row.score),

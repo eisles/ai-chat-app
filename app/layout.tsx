@@ -26,6 +26,8 @@ const navLinks = [
   { href: "/product-images-vectorize", label: "画像ベクトル化(独自API)" },
   { href: "/product-images-vectorize/list", label: "ベクトル一覧(独自API)" },
   { href: "/product-images-vectorize/search", label: "画像検索(独自API)" },
+  { href: "/image-search", label: "画像検索(アップロード)" },
+  { href: "/text-registration", label: "文字情報登録" },
   { href: "/product-images/list", label: "ベクトル一覧" },
   { href: "/playing-with-neon", label: "playing_with_neon" },
 ];
