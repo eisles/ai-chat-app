@@ -25,6 +25,7 @@ type ApiResult = {
 
 export default function ImageSearchPage() {
   const [file, setFile] = useState<File | null>(null);
+  const [imageUrl, setImageUrl] = useState("");
   const [topK, setTopK] = useState("5");
   const [threshold, setThreshold] = useState("0.6");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -46,8 +47,12 @@ export default function ImageSearchPage() {
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    if (!file) {
-      setResult({ ok: false, error: "画像ファイルを選択してください" });
+    if (!file && !imageUrl.trim()) {
+      setResult({ ok: false, error: "画像ファイルかURLを入力してください" });
+      return;
+    }
+    if (file && imageUrl.trim()) {
+      setResult({ ok: false, error: "画像ファイルかURLのどちらかを指定してください" });
       return;
     }
 
@@ -56,7 +61,12 @@ export default function ImageSearchPage() {
 
     try {
       const formData = new FormData();
-      formData.append("file", file);
+      if (file) {
+        formData.append("file", file);
+      }
+      if (imageUrl.trim()) {
+        formData.append("imageUrl", imageUrl.trim());
+      }
       formData.append(
         "options",
         JSON.stringify({
@@ -116,6 +126,15 @@ export default function ImageSearchPage() {
                 const selected = event.target.files?.[0] ?? null;
                 setFile(selected);
               }}
+            />
+          </div>
+          <div className="space-y-2">
+            <div className="text-sm font-medium">画像URL</div>
+            <Input
+              id="imageUrl"
+              placeholder="https://example.com/image.jpg"
+              value={imageUrl}
+              onChange={(event) => setImageUrl(event.target.value)}
             />
           </div>
 

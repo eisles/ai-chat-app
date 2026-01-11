@@ -74,9 +74,45 @@ function isSupportedImageType(contentType: string | undefined) {
   return ["image/png", "image/jpeg", "image/jpg"].includes(contentType);
 }
 
+function normalizeImageUrl(value: FormDataEntryValue | null) {
+  if (!value) {
+    return null;
+  }
+  if (typeof value !== "string") {
+    throw new ApiError("imageUrl must be a string", 400);
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    new URL(trimmed);
+  } catch {
+    throw new ApiError("imageUrl must be a valid URL", 400);
+  }
+  return trimmed;
+}
+
 async function fileToDataUrl(file: File) {
   const buffer = Buffer.from(await file.arrayBuffer());
   const contentType = file.type || "image/jpeg";
+  return `data:${contentType};base64,${buffer.toString("base64")}`;
+}
+
+async function imageUrlToDataUrl(imageUrl: string) {
+  const res = await fetch(imageUrl);
+  if (!res.ok) {
+    const body = await res.text();
+    throw new ApiError(`Failed to download image: ${res.status} ${body}`, 400);
+  }
+  const contentType = res.headers.get("content-type") ?? "image/jpeg";
+  if (!isSupportedImageType(contentType)) {
+    throw new ApiError("Unsupported image type", 400);
+  }
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length > MAX_UPLOAD_BYTES) {
+    throw new ApiError("Image exceeds size limit", 413);
+  }
   return `data:${contentType};base64,${buffer.toString("base64")}`;
 }
 
@@ -154,19 +190,27 @@ export async function POST(req: Request) {
   try {
     const formData = await req.formData();
     const file = formData.get("file");
+    const imageUrl = normalizeImageUrl(formData.get("imageUrl"));
 
-    if (!(file instanceof File)) {
-      throw new ApiError("Image file is required", 400);
+    if (!(file instanceof File) && !imageUrl) {
+      throw new ApiError("Image file or imageUrl is required", 400);
     }
-    if (!isSupportedImageType(file.type)) {
-      throw new ApiError("Unsupported image type", 400);
+    if (file instanceof File && imageUrl) {
+      throw new ApiError("Provide either file or imageUrl", 400);
     }
-    if (file.size > MAX_UPLOAD_BYTES) {
-      throw new ApiError("Image exceeds size limit", 413);
+    if (file instanceof File) {
+      if (!isSupportedImageType(file.type)) {
+        throw new ApiError("Unsupported image type", 400);
+      }
+      if (file.size > MAX_UPLOAD_BYTES) {
+        throw new ApiError("Image exceeds size limit", 413);
+      }
     }
 
     const options = parseSearchOptions(formData.get("options"));
-    const dataUrl = await fileToDataUrl(file);
+    const dataUrl = file instanceof File
+      ? await fileToDataUrl(file)
+      : await imageUrlToDataUrl(imageUrl!);
     const description = await generateCaption(dataUrl);
     const embedding = await generateTextEmbedding(description);
     const matches = await searchTextEmbeddings({

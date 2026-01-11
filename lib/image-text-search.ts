@@ -52,7 +52,7 @@ async function ensureTextEmbeddingsTable() {
       product_id varchar(20) not null,
       city_code varchar(10),
       text text not null,
-      embedding vector(${TARGET_DIM}) not null,
+      embedding vector(1536) not null,
       embedding_length integer,
       embedding_bytes integer,
       embedding_ms integer,
