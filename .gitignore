@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local settings
+.claude/
+nimbalyst-local/
+
+# data files
+*.csv
