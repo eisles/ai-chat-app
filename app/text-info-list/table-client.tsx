@@ -23,10 +23,13 @@ type Props = {
 };
 
 export default function TextInfoTable({ rows }: Props) {
+  const [tableRows, setTableRows] = useState<Row[]>(rows);
   const [selectedRow, setSelectedRow] = useState<Row | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const columns = useMemo(() => {
-    const baseColumns = rows.reduce<Set<string>>((set, row) => {
+    const baseColumns = tableRows.reduce<Set<string>>((set, row) => {
       Object.keys(row ?? {}).forEach((key) => set.add(key));
       return set;
     }, new Set<string>());
@@ -52,7 +55,44 @@ export default function TextInfoTable({ rows }: Props) {
       .forEach((key) => ordered.push(key));
 
     return ordered;
-  }, [rows]);
+  }, [tableRows]);
+
+  const handleDelete = async (row: Row) => {
+    const idValue = row.id;
+    if (typeof idValue !== "string") {
+      setDeleteError("削除対象のIDが見つかりません。");
+      return;
+    }
+    if (!window.confirm("このレコードを削除しますか？")) {
+      return;
+    }
+
+    setDeletingId(idValue);
+    setDeleteError(null);
+
+    try {
+      const response = await fetch(`/api/texts?id=${encodeURIComponent(idValue)}`, {
+        method: "DELETE",
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { ok?: boolean; error?: string }
+        | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "削除に失敗しました。");
+      }
+
+      setTableRows((prev) => prev.filter((entry) => entry.id !== idValue));
+      if (selectedRow?.id === idValue) {
+        setSelectedRow(null);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "削除に失敗しました。";
+      setDeleteError(message);
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   return (
     <>
@@ -69,7 +109,7 @@ export default function TextInfoTable({ rows }: Props) {
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
-            {rows.map((row, index) => (
+            {tableRows.map((row, index) => (
               <tr key={index} className="hover:bg-muted/40">
                 {columns.map((column) => (
                   <td key={column} className="whitespace-nowrap px-4 py-3">
@@ -77,19 +117,34 @@ export default function TextInfoTable({ rows }: Props) {
                   </td>
                 ))}
                 <td className="whitespace-nowrap px-4 py-3">
-                  <button
-                    className="text-xs text-blue-600 hover:underline"
-                    onClick={() => setSelectedRow(row)}
-                    type="button"
-                  >
-                    詳細
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="text-xs text-blue-600 hover:underline"
+                      onClick={() => setSelectedRow(row)}
+                      type="button"
+                    >
+                      詳細
+                    </button>
+                    <button
+                      className="text-xs text-destructive hover:underline disabled:opacity-50"
+                      disabled={deletingId === row.id}
+                      onClick={() => handleDelete(row)}
+                      type="button"
+                    >
+                      {deletingId === row.id ? "削除中..." : "削除"}
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {deleteError ? (
+        <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          {deleteError}
+        </div>
+      ) : null}
 
       <Dialog
         onOpenChange={(open) => {

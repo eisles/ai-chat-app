@@ -104,6 +104,7 @@ export async function POST(req: Request) {
         id,
         city_code,
         product_id,
+        slide_index,
         image_url,
         embedding <-> ${embeddingLiteral}::vector as distance
       from public.product_images_vectorize
@@ -113,6 +114,7 @@ export async function POST(req: Request) {
       id: string;
       city_code: string | null;
       product_id: string | null;
+      slide_index: number | null;
       image_url: string;
       distance: number;
     }>;
@@ -132,4 +134,3 @@ export async function POST(req: Request) {
     return Response.json({ ok: false, error: message }, { status: 500 });
   }
 }
-

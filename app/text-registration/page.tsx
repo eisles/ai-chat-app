@@ -3,6 +3,7 @@
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { useState } from "react";
 
 type ApiResult = {
@@ -33,6 +34,7 @@ export default function TextRegistrationPage() {
   const [metadata, setMetadata] = useState("{}");
   const [productId, setProductId] = useState("");
   const [cityCode, setCityCode] = useState("");
+  const [productJson, setProductJson] = useState("");
   const [bulkItems, setBulkItems] = useState(initialBulk);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [result, setResult] = useState<ApiResult | null>(null);
@@ -94,6 +96,43 @@ export default function TextRegistrationPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+      });
+
+      const data = (await res.json()) as ApiResult;
+      setResult(data);
+    } catch (error) {
+      setResult({
+        ok: false,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function handleProductSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    setIsSubmitting(true);
+    setResult(null);
+
+    try {
+      if (!productJson.trim()) {
+        setResult({ ok: false, error: "商品JSONを入力してください" });
+        return;
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(productJson);
+      } catch {
+        setResult({ ok: false, error: "商品JSONが不正です" });
+        return;
+      }
+
+      const res = await fetch("/api/texts/from-product", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ product: parsed }),
       });
 
       const data = (await res.json()) as ApiResult;
@@ -219,6 +258,33 @@ export default function TextRegistrationPage() {
             </Button>
             <Button type="submit" disabled={isSubmitting}>
               {isSubmitting ? "登録中..." : "一括登録"}
+            </Button>
+          </div>
+        </form>
+      </Card>
+
+      <Card className="border bg-card/60 p-4 shadow-sm sm:p-6">
+        <h2 className="text-lg font-semibold">商品JSON登録</h2>
+        <form className="mt-4 flex flex-col gap-4" onSubmit={handleProductSubmit}>
+          <div className="space-y-2">
+            <div className="text-sm font-medium">商品JSON</div>
+            <Textarea
+              value={productJson}
+              onChange={(event) => setProductJson(event.target.value)}
+              placeholder="APIで取得した商品JSONを貼り付けてください"
+              rows={12}
+            />
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <Button type="submit" disabled={isSubmitting}>
+              {isSubmitting ? "登録中..." : "商品JSONで登録"}
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setProductJson("")}
+            >
+              クリア
             </Button>
           </div>
         </form>

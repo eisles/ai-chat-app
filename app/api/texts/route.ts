@@ -1,3 +1,4 @@
+import { getDb } from "@/lib/neon";
 import {
   assertOpenAIError,
   registerTextEntry,
@@ -73,6 +74,17 @@ function errorResponse(error: unknown) {
   return Response.json({ ok: false, error: message }, { status: 500 });
 }
 
+async function deleteTextEntryById(id: string) {
+  const db = getDb();
+  const rows = (await db`
+    delete from product_text_embeddings
+    where id = ${id}
+    returning id
+  `) as Array<{ id: string }>;
+
+  return rows[0]?.id ?? null;
+}
+
 export async function POST(req: Request) {
   try {
     const payload = (await req.json()) as TextRegistrationPayload;
@@ -103,12 +115,31 @@ export async function POST(req: Request) {
   }
 }
 
+export async function DELETE(req: Request) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const id = searchParams.get("id");
+    if (!id) {
+      throw new ApiError("id is required", 400);
+    }
+
+    const deletedId = await deleteTextEntryById(id);
+    if (!deletedId) {
+      throw new ApiError("text entry not found", 404);
+    }
+
+    return Response.json({ ok: true, id: deletedId });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
 export function OPTIONS() {
   return new Response(null, {
     status: 204,
     headers: {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Methods": "POST, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
       "Access-Control-Max-Age": "86400",
     },

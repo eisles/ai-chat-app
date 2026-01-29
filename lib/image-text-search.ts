@@ -17,7 +17,11 @@ export type RegisteredText = {
   productId: string;
   cityCode: string | null;
   textHash: string;
-  status: "stored" | "skipped";
+  status: "stored" | "updated";
+};
+
+export type DeletedText = {
+  id: string;
 };
 
 export type SearchMatch = {
@@ -27,6 +31,40 @@ export type SearchMatch = {
   text: string;
   metadata: TextMetadata | null;
   score: number;
+  amount: number | null;
+};
+
+export type ProductCategory = {
+  category1_name?: string | null;
+  category2_name?: string | null;
+  category3_name?: string | null;
+};
+
+export type ProductPayload = {
+  id: number | string;
+  name?: string | null;
+  description?: string | null;
+  catchphrase?: string | null;
+  image?: string | null;
+  slide_image1?: string | null;
+  slide_image2?: string | null;
+  slide_image3?: string | null;
+  slide_image4?: string | null;
+  slide_image5?: string | null;
+  slide_image6?: string | null;
+  slide_image7?: string | null;
+  slide_image8?: string | null;
+  bulk_text?: string | null;
+  application_text?: string | null;
+  shipping_text?: string | null;
+  allergens?: string[] | null;
+  amount?: number | string | null;
+  city_code?: string | null;
+  city_name?: string | null;
+  prefecture_name?: string | null;
+  categories?: ProductCategory[] | null;
+  imperfect_text?: string | null;
+  imperfect_additional_text?: string | null;
 };
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -52,6 +90,7 @@ async function ensureTextEmbeddingsTable() {
       product_id varchar(20) not null,
       city_code varchar(10),
       text text not null,
+      text_source text,
       embedding vector(1536) not null,
       embedding_length integer,
       embedding_bytes integer,
@@ -70,14 +109,101 @@ async function ensureTextEmbeddingsTable() {
     add column if not exists city_code varchar(10)
   `;
   await db`
-    create unique index if not exists product_text_embeddings_product_id_idx
+    alter table product_text_embeddings
+    add column if not exists text_source text
+  `;
+  await db`
+    drop index if exists product_text_embeddings_product_id_idx
+  `;
+  await db`
+    create index if not exists product_text_embeddings_product_id_idx
       on product_text_embeddings(product_id)
+  `;
+  await db`
+    alter table product_text_embeddings
+    add column if not exists amount integer
+  `;
+  await db`
+    create index if not exists product_text_embeddings_amount_idx
+      on product_text_embeddings(amount)
   `;
   return db;
 }
 
-export function hashText(text: string) {
-  return createHash("sha256").update(text).digest("hex");
+export function hashText(text: string, source?: string) {
+  const payload = source ? `${source}:${text}` : text;
+  return createHash("sha256").update(payload).digest("hex");
+}
+
+function joinNonEmpty(parts: Array<string | null | undefined>, delimiter: string) {
+  return parts
+    .map((part) => (part ?? "").toString().trim())
+    .filter((part) => part.length > 0)
+    .join(delimiter);
+}
+
+function formatCategories(categories: ProductCategory[] | null | undefined) {
+  if (!categories || categories.length === 0) {
+    return "";
+  }
+  const formatted = categories.map((category) =>
+    joinNonEmpty(
+      [category.category1_name, category.category2_name, category.category3_name],
+      " > "
+    )
+  );
+  return formatted.filter((entry) => entry.length > 0).join(" / ");
+}
+
+export function buildProductEmbeddingText(product: ProductPayload) {
+  const cityLine = joinNonEmpty(
+    [product.prefecture_name, product.city_name],
+    " "
+  );
+  const categories = formatCategories(product.categories);
+  const categoryKeywords = product.categories
+    ? product.categories
+        .flatMap((category) => [
+          category.category1_name,
+          category.category2_name,
+          category.category3_name,
+        ])
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        .map((value) => value.trim())
+        .join(" / ")
+    : "";
+  const allergens =
+    product.allergens && product.allergens.length > 0
+      ? product.allergens.join(" / ")
+      : "";
+  const amount =
+    product.amount !== undefined && product.amount !== null
+      ? `${product.amount}円`
+      : "";
+  const featureParts = joinNonEmpty(
+    [product.bulk_text, product.imperfect_text, product.imperfect_additional_text],
+    " "
+  );
+
+  const lines = [
+    product.city_code ? `市町村コード: ${product.city_code}` : "",
+    cityLine ? `地域名: ${cityLine}` : "",
+    product.name ? `商品名: ${product.name}` : "",
+    product.catchphrase ? `キャッチコピー: ${product.catchphrase}` : "",
+    product.description ? `説明: ${product.description}` : "",
+    featureParts ? `特徴: ${featureParts}` : "",
+    categories ? `カテゴリ: ${categories}` : "",
+    categoryKeywords ? `カテゴリキーワード: ${categoryKeywords}` : "",
+    product.application_text ? `用途: ${product.application_text}` : "",
+    product.application_text ? `用途タグ: ${product.application_text}` : "",
+    amount ? `金額: ${amount}` : "",
+    product.shipping_text ? `配送条件: ${product.shipping_text}` : "",
+    product.shipping_text ? `配送タグ: ${product.shipping_text}` : "",
+    allergens ? `アレルゲン: ${allergens}` : "",
+    allergens ? `アレルゲンタグ: ${allergens}` : "",
+  ];
+
+  return lines.filter((line) => line.length > 0).join("\n");
 }
 
 export async function generateTextEmbedding(text: string): Promise<EmbeddingResult> {
@@ -138,26 +264,15 @@ export async function registerTextEntry(options: {
   metadata: TextMetadata | null;
   productId?: string;
   cityCode?: string;
+  source?: string;
+  useSourceInHash?: boolean;
+  amount?: number | null;
 }): Promise<RegisteredText> {
   const db = await ensureTextEmbeddingsTable();
-  const textHash = hashText(options.text);
-
-  const existing = (await db`
-    select id, product_id
-    from product_text_embeddings
-    where text_hash = ${textHash}
-    limit 1
-  `) as Array<{ id: string; product_id: string }>;
-
-  if (existing.length > 0) {
-    return {
-      id: existing[0]!.id,
-      productId: existing[0]!.product_id,
-      cityCode: null,
-      textHash,
-      status: "skipped",
-    };
-  }
+  const source = options.source;
+  const textHash = options.useSourceInHash
+    ? hashText(options.text, source ?? "unknown")
+    : hashText(options.text);
 
   const embedding = await generateTextEmbedding(options.text);
   const embeddingLiteral = `[${embedding.vector.join(",")}]`;
@@ -173,6 +288,7 @@ export async function registerTextEntry(options: {
       product_id,
       city_code,
       text,
+      text_source,
       embedding,
       embedding_length,
       embedding_bytes,
@@ -181,13 +297,15 @@ export async function registerTextEntry(options: {
       dim,
       normalized,
       metadata,
-      text_hash
+      text_hash,
+      amount
     )
     values (
       ${id},
       ${productId},
       ${options.cityCode ?? null},
       ${options.text},
+      ${source ?? null},
       ${embeddingLiteral}::vector,
       ${embedding.vector.length},
       ${embedding.byteSize},
@@ -196,10 +314,26 @@ export async function registerTextEntry(options: {
       ${embedding.dim},
       ${embedding.normalized},
       ${metadataLiteral}::jsonb,
-      ${textHash}
+      ${textHash},
+      ${options.amount ?? null}
     )
-    returning id, product_id
-  `) as Array<{ id: string; product_id: string }>;
+    on conflict (text_hash) do update
+    set product_id = excluded.product_id,
+        city_code = excluded.city_code,
+        text = excluded.text,
+        text_source = excluded.text_source,
+        embedding = excluded.embedding,
+        embedding_length = excluded.embedding_length,
+        embedding_bytes = excluded.embedding_bytes,
+        embedding_ms = excluded.embedding_ms,
+        model = excluded.model,
+        dim = excluded.dim,
+        normalized = excluded.normalized,
+        metadata = excluded.metadata,
+        amount = excluded.amount,
+        updated_at = now()
+    returning id, product_id, (xmax = 0) as inserted
+  `) as Array<{ id: string; product_id: string; inserted: boolean }>;
 
   if (rows.length === 0) {
     throw new Error("Failed to register text entry");
@@ -210,7 +344,7 @@ export async function registerTextEntry(options: {
     productId: rows[0]!.product_id,
     cityCode: options.cityCode ?? null,
     textHash,
-    status: "stored",
+    status: rows[0]!.inserted ? "stored" : "updated",
   };
 }
 
@@ -229,6 +363,7 @@ export async function searchTextEmbeddings(options: {
       city_code,
       text,
       metadata,
+      amount,
       1 - (embedding <=> ${embeddingLiteral}::vector) as score
     from product_text_embeddings
     where 1 - (embedding <=> ${embeddingLiteral}::vector) >= ${options.threshold}
@@ -240,6 +375,7 @@ export async function searchTextEmbeddings(options: {
     city_code: string | null;
     text: string;
     metadata: TextMetadata | null;
+    amount: number | null;
     score: number;
   }>;
 
@@ -250,7 +386,23 @@ export async function searchTextEmbeddings(options: {
     text: row.text,
     metadata: row.metadata ?? null,
     score: Number(row.score),
+    amount: row.amount ?? null,
   }));
+}
+
+export async function deleteTextEntry(id: string): Promise<DeletedText | null> {
+  const db = await ensureTextEmbeddingsTable();
+  const rows = (await db`
+    delete from product_text_embeddings
+    where id = ${id}
+    returning id
+  `) as Array<{ id: string }>;
+
+  if (rows.length === 0) {
+    return null;
+  }
+
+  return { id: rows[0]!.id };
 }
 
 export function assertOpenAIError(error: unknown): OpenAIError | null {

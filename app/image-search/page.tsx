@@ -14,12 +14,43 @@ type SearchMatch = {
   score: number;
 };
 
+type ImageMatch = {
+  id: string;
+  productId: string | null;
+  cityCode: string | null;
+  slideIndex: number | null;
+  imageUrl: string;
+  distance: number;
+  imageSimilarity: number;
+  imageScore: number;
+};
+
+type CombinedMatch = {
+  key: string;
+  productId: string | null;
+  cityCode: string | null;
+  slideIndex: number | null;
+  text?: string;
+  metadata?: Record<string, unknown> | null;
+  imageUrl?: string;
+  textScore: number;
+  textSimilarity: number;
+  imageScore: number;
+  imageSimilarity: number;
+  imageDistance: number | null;
+  textDistance: number | null;
+  score: number;
+};
+
 type ApiResult = {
   ok: boolean;
   trackingId?: string;
   description?: string;
   elapsedMs?: number;
   matches?: SearchMatch[];
+  imageMatches?: ImageMatch[];
+  combinedMatches?: CombinedMatch[];
+  weights?: { text: number; image: number };
   error?: string;
 };
 
@@ -200,27 +231,51 @@ export default function ImageSearchPage() {
                 <div className="whitespace-pre-wrap">
                   description: {result.description}
                 </div>
+                {result.weights && (
+                  <div>
+                    weights: text {result.weights.text}, image {result.weights.image}
+                  </div>
+                )}
               </div>
-              {result.matches && result.matches.length > 0 ? (
+              {result.combinedMatches && result.combinedMatches.length > 0 ? (
                 <div className="space-y-3">
-                  {result.matches.map((match) => (
+                  {result.combinedMatches.map((match) => (
                     <div
                       className="rounded-md border bg-background/70 p-3"
-                      key={match.id}
+                      key={match.key}
                     >
                       <div className="text-sm font-semibold">
                         score: {match.score.toFixed(4)}
                       </div>
                       <div className="mt-1 text-xs text-muted-foreground">
-                        id: {match.id}
-                      </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        productId: {match.productId}
+                        productId: {match.productId ?? "-"}
                       </div>
                       <div className="mt-1 text-xs text-muted-foreground">
                         cityCode: {match.cityCode ?? "-"}
                       </div>
-                      <div className="mt-2 text-sm">{match.text}</div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        slideIndex: {match.slideIndex ?? "-"}
+                      </div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        textScore: {match.textScore.toFixed(4)} / imageScore: {match.imageScore.toFixed(4)}
+                      </div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        textSimilarity: {match.textSimilarity.toFixed(4)} / imageSimilarity: {match.imageSimilarity.toFixed(4)}
+                      </div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        textDistance: {match.textDistance !== null ? match.textDistance.toFixed(4) : "-"}
+                      </div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        imageDistance: {match.imageDistance !== null ? match.imageDistance.toFixed(4) : "-"}
+                      </div>
+                      {match.imageUrl && (
+                        <div className="mt-2 text-xs text-muted-foreground break-all">
+                          imageUrl: {match.imageUrl}
+                        </div>
+                      )}
+                      {match.text && (
+                        <div className="mt-2 text-sm">{match.text}</div>
+                      )}
                       {match.metadata && (
                         <pre className="mt-2 whitespace-pre-wrap rounded bg-muted/50 p-2 text-xs">
                           {JSON.stringify(match.metadata, null, 2)}
