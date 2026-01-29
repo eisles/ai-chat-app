@@ -33,6 +33,7 @@ const navLinks = [
   { href: "/agent-recommend", label: "エージェント質問レコメンド" },
   { href: "/text-info-list", label: "文字情報一覧" },
   { href: "/product-images/list", label: "ベクトル一覧" },
+  { href: "/migrate-amount", label: "金額マイグレーション" },
   { href: "/playing-with-neon", label: "playing_with_neon" },
 ];
 
