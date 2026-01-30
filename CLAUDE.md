@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 言語設定 / Language
+
+- **回答は日本語で行うこと** - すべての説明、コメント、サマリーは日本語で記述する
+- **コード内のコメントも日本語で記述する**
+
 ## Development Commands
 
 ```bash

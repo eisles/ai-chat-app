@@ -3,11 +3,14 @@ import {
   generateTextEmbedding,
   searchTextEmbeddings,
 } from "@/lib/image-text-search";
+import {
+  createCompletion,
+  LLMProviderError,
+} from "@/lib/llm-providers";
 
 export const runtime = "nodejs";
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const KEYWORD_MODEL = process.env.OPENAI_KEYWORD_MODEL ?? "gpt-4o-mini";
+const DEFAULT_MODEL = "openai:gpt-4o-mini";
 const DEFAULT_TOP_K = 10;
 const DEFAULT_THRESHOLD = 0.6;
 const STOP_WORDS = (process.env.CHAT_RECOMMEND_STOP_WORDS ?? "")
@@ -30,6 +33,7 @@ type RecommendPayload = {
   threshold?: unknown;
   useReranking?: unknown;
   stopWords?: unknown;
+  model?: unknown;
 };
 
 function parseHistory(value: unknown) {
@@ -67,74 +71,114 @@ function parseStopWords(value: unknown) {
   return STOP_WORDS;
 }
 
-async function extractKeywords(history: string) {
-  if (!OPENAI_API_KEY) {
-    throw new ApiError("OPENAI_API_KEY is not set", 500);
+function parseModel(value: unknown) {
+  if (typeof value === "string" && value.includes(":")) {
+    return value;
   }
+  return DEFAULT_MODEL;
+}
 
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: KEYWORD_MODEL,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You extract concise Japanese keywords for product recommendation. Return a JSON array of strings.",
-        },
-        {
-          role: "user",
-          content: history,
-        },
-      ],
-      max_tokens: 200,
-      temperature: 0.2,
-    }),
+type AmountRange = {
+  min?: number | null;
+  max?: number | null;
+};
+
+type KeywordExtractionResult = {
+  keywords: string[];
+  amountRange: AmountRange | null;
+};
+
+async function extractKeywords(history: string, model: string): Promise<KeywordExtractionResult> {
+  const response = await createCompletion({
+    model,
+    messages: [
+      {
+        role: "system",
+        content: `Extract keywords and price range from Japanese text for product search.
+
+Return ONLY valid JSON (no explanation text):
+{"keywords":["keyword1","keyword2"],"amountRange":null}
+
+Examples:
+- "牛肉の返礼品" → {"keywords":["牛肉"],"amountRange":null}
+- "5000円以下のお肉" → {"keywords":["お肉"],"amountRange":{"max":5000}}
+- "1万円くらいの海鮮" → {"keywords":["海鮮"],"amountRange":{"min":8500,"max":11500}}
+- "いちご 苺 ストロベリー" → {"keywords":["いちご","苺","ストロベリー"],"amountRange":null}
+
+Price rules:
+- "〜円以下" → {"max":N}
+- "〜円以上" → {"min":N}
+- "〜円くらい/前後/程度" → ±15% (min=N*0.85, max=N*1.15)
+- 千=1000, 万=10000`,
+      },
+      {
+        role: "user",
+        content: history,
+      },
+    ],
+    maxTokens: 300,
+    temperature: 0.2,
   });
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new ApiError(
-      `OpenAI keyword extraction failed: ${response.status} ${body}`,
-      response.status
-    );
-  }
+  const content = response.content;
 
-  const json = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const content = json?.choices?.[0]?.message?.content?.trim() ?? "";
-
-  const fallback = content
+  const fallbackKeywords = content
     .split(/[,\n、]/)
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
 
+  // Extract JSON from response (handle cases where LLM adds explanation text)
+  const jsonMatch = content.match(/\{[\s\S]*\}/);
+  const jsonContent = jsonMatch ? jsonMatch[0] : content;
+
   try {
-    const parsed = JSON.parse(content) as unknown;
-    if (Array.isArray(parsed)) {
-      return parsed.map((item) => String(item)).filter((item) => item.length > 0);
-    }
-    if (parsed && typeof parsed === "object" && "keywords" in parsed) {
-      const keywords = (parsed as { keywords?: unknown }).keywords;
-      if (Array.isArray(keywords)) {
-        return keywords.map((item) => String(item)).filter((item) => item.length > 0);
+    const parsed = JSON.parse(jsonContent) as unknown;
+
+    if (parsed && typeof parsed === "object") {
+      const obj = parsed as Record<string, unknown>;
+
+      let keywords: string[] = [];
+      if (Array.isArray(obj.keywords)) {
+        keywords = obj.keywords.map((item) => String(item)).filter((item) => item.length > 0);
+      } else if (Array.isArray(parsed)) {
+        keywords = (parsed as unknown[]).map((item) => String(item)).filter((item) => item.length > 0);
+        return { keywords, amountRange: null };
       }
+
+      let amountRange: AmountRange | null = null;
+      if (obj.amountRange && typeof obj.amountRange === "object") {
+        const range = obj.amountRange as Record<string, unknown>;
+        const min = typeof range.min === "number" ? range.min : null;
+        const max = typeof range.max === "number" ? range.max : null;
+        if (min !== null || max !== null) {
+          amountRange = { min, max };
+        }
+      }
+
+      return { keywords, amountRange };
+    }
+
+    if (Array.isArray(parsed)) {
+      return {
+        keywords: (parsed as unknown[]).map((item) => String(item)).filter((item) => item.length > 0),
+        amountRange: null,
+      };
     }
   } catch {
     // fallback to non-JSON parsing
   }
 
-  return fallback;
+  return { keywords: fallbackKeywords, amountRange: null };
 }
 
 function errorResponse(error: unknown) {
   if (error instanceof ApiError) {
     return Response.json({ ok: false, error: error.message }, { status: error.status });
+  }
+
+  if (error instanceof LLMProviderError) {
+    const status = error.status === 429 ? 429 : error.status >= 500 ? 502 : error.status;
+    return Response.json({ ok: false, error: error.message }, { status });
   }
 
   const openAIError = assertOpenAIError(error);
@@ -155,17 +199,25 @@ export async function POST(req: Request) {
     const threshold = parseThreshold(payload.threshold);
     const useReranking = parseUseReranking(payload.useReranking);
     const stopWords = parseStopWords(payload.stopWords);
+    const model = parseModel(payload.model);
 
-    const rawKeywords = useReranking ? await extractKeywords(history) : [];
+    const extractionResult = useReranking
+      ? await extractKeywords(history, model)
+      : { keywords: [], amountRange: null };
     const stopWordsSet = new Set(stopWords.map((w) => w.toLowerCase()));
-    const keywords = rawKeywords.filter(
+    const keywords = extractionResult.keywords.filter(
       (kw) => !stopWordsSet.has(kw.toLowerCase())
     );
-    const embedding = await generateTextEmbedding(history);
+    const amountRange = extractionResult.amountRange;
+    // キーワードがある場合はキーワードからembeddingを生成し、ベクトル検索を商品に特化させる
+    const searchText = keywords.length > 0 ? keywords.join(" ") : history;
+    const embedding = await generateTextEmbedding(searchText);
     const matches = await searchTextEmbeddings({
       embedding: embedding.vector,
       topK,
       threshold,
+      amountMin: amountRange?.min,
+      amountMax: amountRange?.max,
     });
     const primaryKeyword = keywords[0]?.trim() ?? "";
     const normalizeText = (value: string) => value.replace(/\s+/g, "");
@@ -208,6 +260,7 @@ export async function POST(req: Request) {
     return Response.json({
       ok: true,
       keywords,
+      amountRange,
       queryText: history,
       matches: finalMatches,
     });
