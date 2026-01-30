@@ -1,5 +1,6 @@
 "use client";
 
+import { ModelSelector } from "@/components/model-selector";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -16,9 +17,15 @@ type Match = {
   amount: number | null;
 };
 
+type AmountRange = {
+  min?: number | null;
+  max?: number | null;
+};
+
 type ApiResult = {
   ok: boolean;
   keywords?: string[];
+  amountRange?: AmountRange | null;
   queryText?: string;
   matches?: Match[];
   error?: string;
@@ -30,6 +37,7 @@ export default function ChatRecommendPage() {
   const [threshold, setThreshold] = useState("0.6");
   const [useReranking, setUseReranking] = useState(true);
   const [stopWordsInput, setStopWordsInput] = useState("");
+  const [selectedModel, setSelectedModel] = useState("openai:gpt-4o-mini");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [result, setResult] = useState<ApiResult | null>(null);
 
@@ -60,6 +68,7 @@ export default function ChatRecommendPage() {
             .split(",")
             .map((w) => w.trim())
             .filter((w) => w),
+          model: selectedModel,
         }),
       });
 
@@ -139,21 +148,31 @@ export default function ChatRecommendPage() {
           </div>
 
           {useReranking && (
-            <div className="space-y-2">
-              <div className="text-sm font-medium">除外キーワード（カンマ区切り）</div>
-              <Input
-                value={stopWordsInput}
-                onChange={(e) => setStopWordsInput(e.target.value)}
-                placeholder="例: ふるさと納税, 返礼品"
-              />
-            </div>
+            <>
+              <div className="space-y-2">
+                <div className="text-sm font-medium">LLMモデル</div>
+                <ModelSelector
+                  value={selectedModel}
+                  onChange={setSelectedModel}
+                  className="w-full sm:w-64"
+                />
+              </div>
+              <div className="space-y-2">
+                <div className="text-sm font-medium">除外キーワード（カンマ区切り）</div>
+                <Input
+                  value={stopWordsInput}
+                  onChange={(e) => setStopWordsInput(e.target.value)}
+                  placeholder="例: ふるさと納税, 返礼品"
+                />
+              </div>
+            </>
           )}
 
           <div className="rounded-md bg-muted/50 p-3 text-xs text-muted-foreground space-y-2">
             <div>
               <div className="font-medium mb-1">ベクトル検索:</div>
               <ul className="list-disc list-inside space-y-0.5">
-                <li>検索クエリ: チャット履歴全体</li>
+                <li>検索クエリ: キーワードがあればキーワード、なければ履歴全体</li>
                 <li>Embedding: text-embedding-3-small</li>
                 <li>類似度: コサイン距離</li>
               </ul>
@@ -161,8 +180,9 @@ export default function ChatRecommendPage() {
             <div>
               <div className="font-medium mb-1">キーワード生成:</div>
               <ul className="list-disc list-inside space-y-0.5">
-                <li>モデル: gpt-4o-mini</li>
-                <li>temperature: 0.2</li>
+                <li>リランキング使用時のみ生成</li>
+                <li>モデル: {selectedModel}</li>
+                <li>temperature: 0.2（低い値で安定した出力を生成）</li>
               </ul>
             </div>
             <div>
@@ -188,6 +208,20 @@ export default function ChatRecommendPage() {
             <div className="mt-3 space-y-4 text-sm">
               <div className="space-y-1">
                 <div>keywords: {result.keywords?.join(" / ")}</div>
+                {result.amountRange && (
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">金額フィルタ:</span>
+                    <span className="rounded-md bg-blue-100 px-2 py-0.5 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
+                      {result.amountRange.min != null && result.amountRange.max != null
+                        ? `${result.amountRange.min.toLocaleString()}円 〜 ${result.amountRange.max.toLocaleString()}円`
+                        : result.amountRange.min != null
+                          ? `${result.amountRange.min.toLocaleString()}円以上`
+                          : result.amountRange.max != null
+                            ? `${result.amountRange.max.toLocaleString()}円以下`
+                            : ""}
+                    </span>
+                  </div>
+                )}
                 <div className="whitespace-pre-wrap">
                   queryText: {result.queryText}
                 </div>
