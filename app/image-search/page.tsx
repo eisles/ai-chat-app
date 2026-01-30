@@ -1,5 +1,6 @@
 "use client";
 
+import { ModelSelector } from "@/components/model-selector";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -59,6 +60,7 @@ export default function ImageSearchPage() {
   const [imageUrl, setImageUrl] = useState("");
   const [topK, setTopK] = useState("5");
   const [threshold, setThreshold] = useState("0.6");
+  const [selectedModel, setSelectedModel] = useState("openai:gpt-4o");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [result, setResult] = useState<ApiResult | null>(null);
 
@@ -105,6 +107,7 @@ export default function ImageSearchPage() {
           threshold: threshold ? Number(threshold) : undefined,
         }),
       );
+      formData.append("model", selectedModel);
 
       const res = await fetch("/api/image-search", {
         method: "POST",
@@ -166,6 +169,16 @@ export default function ImageSearchPage() {
               placeholder="https://example.com/image.jpg"
               value={imageUrl}
               onChange={(event) => setImageUrl(event.target.value)}
+            />
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-sm font-medium">Vision モデル</div>
+            <ModelSelector
+              value={selectedModel}
+              onChange={setSelectedModel}
+              filterVision
+              className="w-full sm:w-64"
             />
           </div>
 

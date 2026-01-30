@@ -352,9 +352,13 @@ export async function searchTextEmbeddings(options: {
   embedding: number[];
   topK: number;
   threshold: number;
+  amountMin?: number | null;
+  amountMax?: number | null;
 }): Promise<SearchMatch[]> {
   const db = await ensureTextEmbeddingsTable();
   const embeddingLiteral = `[${options.embedding.join(",")}]`;
+  const amountMin = options.amountMin ?? null;
+  const amountMax = options.amountMax ?? null;
 
   const rows = (await db`
     select
@@ -367,6 +371,8 @@ export async function searchTextEmbeddings(options: {
       1 - (embedding <=> ${embeddingLiteral}::vector) as score
     from product_text_embeddings
     where 1 - (embedding <=> ${embeddingLiteral}::vector) >= ${options.threshold}
+      and (${amountMin}::integer is null or amount >= ${amountMin})
+      and (${amountMax}::integer is null or amount <= ${amountMax})
     order by embedding <=> ${embeddingLiteral}::vector
     limit ${options.topK}
   `) as Array<{

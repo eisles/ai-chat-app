@@ -3,13 +3,17 @@ import {
   generateTextEmbedding,
   searchTextEmbeddings,
 } from "@/lib/image-text-search";
+import {
+  createCompletion,
+  getModelById,
+  LLMProviderError,
+} from "@/lib/llm-providers";
 import { getDb } from "@/lib/neon";
 import { randomUUID } from "crypto";
 
 export const runtime = "nodejs";
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const CAPTION_MODEL = process.env.OPENAI_CAPTION_MODEL ?? "gpt-4o";
+const DEFAULT_VISION_MODEL = "openai:gpt-4o";
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 const DEFAULT_TOP_K = 10;
 const DEFAULT_THRESHOLD = 0.78;
@@ -227,47 +231,30 @@ function rankFusionScores<T>(items: T[]): Map<T, number> {
   return new Map(items.map((item, index) => [item, 1 / (index + 1)]));
 }
 
-async function generateCaption(dataUrl: string) {
-  if (!OPENAI_API_KEY) {
-    throw new ApiError("OPENAI_API_KEY is not set", 500);
+async function generateCaption(dataUrl: string, model: string) {
+  const modelConfig = getModelById(model);
+  if (modelConfig && !modelConfig.supportsVision) {
+    throw new ApiError(`Model ${model} does not support vision`, 400);
   }
 
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: CAPTION_MODEL,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "この画像を日本語で簡潔に説明してください。" },
-            { type: "image_url", image_url: { url: dataUrl } },
-          ],
-        },
-      ],
-      max_tokens: 256,
-      temperature: 0.2,
-    }),
+  const response = await createCompletion({
+    model,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "この画像を日本語で簡潔に説明してください。" },
+          { type: "image_url", image_url: { url: dataUrl } },
+        ],
+      },
+    ],
+    maxTokens: 256,
+    temperature: 0.2,
   });
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new ApiError(
-      `OpenAI caption failed: ${response.status} ${body}`,
-      response.status
-    );
-  }
-
-  const json = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const content = json?.choices?.[0]?.message?.content?.trim();
+  const content = response.content;
   if (!content) {
-    throw new ApiError("OpenAI caption response was empty", 500);
+    throw new ApiError("Caption response was empty", 500);
   }
 
   return content;
@@ -278,6 +265,14 @@ function errorResponse(trackingId: string, error: unknown) {
     return Response.json(
       { ok: false, error: error.message, trackingId },
       { status: error.status }
+    );
+  }
+
+  if (error instanceof LLMProviderError) {
+    const status = error.status === 429 ? 429 : error.status >= 500 ? 502 : error.status;
+    return Response.json(
+      { ok: false, error: error.message, trackingId },
+      { status }
     );
   }
 
@@ -319,10 +314,14 @@ export async function POST(req: Request) {
     }
 
     const options = parseSearchOptions(formData.get("options"));
+    const modelParam = formData.get("model");
+    const model = typeof modelParam === "string" && modelParam.includes(":")
+      ? modelParam
+      : DEFAULT_VISION_MODEL;
     const dataUrl = file instanceof File
       ? await fileToDataUrl(file)
       : await imageUrlToDataUrl(imageUrl!);
-    const description = await generateCaption(dataUrl);
+    const description = await generateCaption(dataUrl, model);
     const embedding = await generateTextEmbedding(description);
     const matches = await searchTextEmbeddings({
       embedding: embedding.vector,
