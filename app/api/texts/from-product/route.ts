@@ -163,7 +163,7 @@ export async function POST(req: Request) {
       source: "product_json",
     });
 
-    let captionStatus: "stored" | "skipped" | null = null;
+    let captionStatus: "stored" | "updated" | "skipped" | null = null;
     let captionId: string | null = null;
     if (product.image && product.image.trim()) {
       const dataUrl = await imageUrlToDataUrl(product.image);

@@ -33,6 +33,7 @@ export async function POST(req: Request) {
         dim,
         normalized,
       },
+      slideIndex: 0,
     });
 
     return Response.json({
