@@ -2,6 +2,7 @@ import {
   assertOpenAIError,
   generateTextEmbedding,
   searchTextEmbeddings,
+  SearchMatch,
 } from "@/lib/image-text-search";
 import {
   createCompletion,
@@ -13,6 +14,7 @@ export const runtime = "nodejs";
 const DEFAULT_MODEL = "openai:gpt-4o-mini";
 const DEFAULT_TOP_K = 10;
 const DEFAULT_THRESHOLD = 0.6;
+const RRF_K = 60; // RRFアルゴリズムの定数
 const STOP_WORDS = (process.env.CHAT_RECOMMEND_STOP_WORDS ?? "")
   .split(",")
   .map((w) => w.trim())
@@ -32,6 +34,7 @@ type RecommendPayload = {
   topK?: unknown;
   threshold?: unknown;
   useReranking?: unknown;
+  useSimilarSearch?: unknown;
   stopWords?: unknown;
   model?: unknown;
 };
@@ -64,6 +67,13 @@ function parseUseReranking(value: unknown) {
   return true;
 }
 
+function parseUseSimilarSearch(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return false;
+}
+
 function parseStopWords(value: unknown) {
   if (Array.isArray(value)) {
     return value.map((w) => String(w).trim()).filter((w) => w.length > 0);
@@ -86,6 +96,12 @@ type AmountRange = {
 type KeywordExtractionResult = {
   keywords: string[];
   amountRange: AmountRange | null;
+};
+
+type SearchStats = {
+  queriesExecuted: number;
+  totalCandidates: number;
+  uniqueResults: number;
 };
 
 async function extractKeywords(history: string, model: string): Promise<KeywordExtractionResult> {
@@ -171,6 +187,138 @@ Price rules:
   return { keywords: fallbackKeywords, amountRange: null };
 }
 
+// 類似キーワードをLLMで生成
+async function generateSimilarKeywords(
+  keyword: string,
+  model: string
+): Promise<string[]> {
+  if (!keyword.trim()) {
+    return [];
+  }
+
+  const response = await createCompletion({
+    model,
+    messages: [
+      {
+        role: "system",
+        content: `Generate 3 similar search keywords for Japanese product search.
+Consider: synonyms, related terms, different writings (hiragana/katakana/kanji).
+
+Return ONLY valid JSON array (no explanation):
+["similar1", "similar2", "similar3"]
+
+Examples:
+- "牛肉" → ["和牛", "黒毛和牛", "ビーフ"]
+- "りんご" → ["リンゴ", "林檎", "アップル"]
+- "みかん" → ["ミカン", "蜜柑", "オレンジ"]
+- "いちご" → ["苺", "ストロベリー", "イチゴ"]
+- "海鮮" → ["魚介", "シーフード", "海の幸"]
+- "ステーキ" → ["牛肉", "ビーフ", "焼肉"]`,
+      },
+      {
+        role: "user",
+        content: keyword,
+      },
+    ],
+    maxTokens: 100,
+    temperature: 0.3,
+  });
+
+  const content = response.content.trim();
+
+  try {
+    // JSONの配列を抽出
+    const jsonMatch = content.match(/\[[\s\S]*\]/);
+    const jsonContent = jsonMatch ? jsonMatch[0] : content;
+    const parsed = JSON.parse(jsonContent) as unknown;
+
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((item) => String(item).trim())
+        .filter((item) => item.length > 0 && item !== keyword)
+        .slice(0, 3);
+    }
+  } catch {
+    // パースエラー時は空配列を返す
+  }
+
+  return [];
+}
+
+// 並列検索を実行
+async function executeParallelSearches(options: {
+  keywords: string[];
+  topK: number;
+  threshold: number;
+  amountMin?: number | null;
+  amountMax?: number | null;
+}): Promise<Map<string, SearchMatch[]>> {
+  const results = new Map<string, SearchMatch[]>();
+
+  // 重複キーワードを除去
+  const uniqueKeywords = [...new Set(options.keywords)];
+
+  // 並列でembedding生成と検索を実行
+  const searchPromises = uniqueKeywords.map(async (keyword) => {
+    const embedding = await generateTextEmbedding(keyword);
+    const matches = await searchTextEmbeddings({
+      embedding: embedding.vector,
+      topK: options.topK,
+      threshold: options.threshold,
+      amountMin: options.amountMin,
+      amountMax: options.amountMax,
+    });
+    return { keyword, matches };
+  });
+
+  const searchResults = await Promise.all(searchPromises);
+
+  for (const { keyword, matches } of searchResults) {
+    results.set(keyword, matches);
+  }
+
+  return results;
+}
+
+// Reciprocal Rank Fusion (RRF) でスコアを計算
+function calculateRRFScores(
+  searchResults: Map<string, SearchMatch[]>,
+  k: number = RRF_K
+): SearchMatch[] {
+  const scores = new Map<string, { match: SearchMatch; rrfScore: number; sources: string[] }>();
+
+  for (const [queryKeyword, results] of searchResults) {
+    results.forEach((match, rank) => {
+      const key = match.productId;
+      const rrfContribution = 1 / (k + rank + 1);
+
+      if (scores.has(key)) {
+        const existing = scores.get(key)!;
+        existing.rrfScore += rrfContribution;
+        existing.sources.push(queryKeyword);
+        // より高い元スコアを保持
+        if (match.score > existing.match.score) {
+          existing.match = { ...match };
+        }
+      } else {
+        scores.set(key, {
+          match: { ...match },
+          rrfScore: rrfContribution,
+          sources: [queryKeyword],
+        });
+      }
+    });
+  }
+
+  // RRFスコアでソートして返す
+  return Array.from(scores.values())
+    .sort((a, b) => b.rrfScore - a.rrfScore)
+    .map(({ match, rrfScore }) => ({
+      ...match,
+      score: rrfScore,
+    }));
+}
+
 function errorResponse(error: unknown) {
   if (error instanceof ApiError) {
     return Response.json({ ok: false, error: error.message }, { status: error.status });
@@ -198,6 +346,7 @@ export async function POST(req: Request) {
     const topK = parseTopK(payload.topK);
     const threshold = parseThreshold(payload.threshold);
     const useReranking = parseUseReranking(payload.useReranking);
+    const useSimilarSearch = parseUseSimilarSearch(payload.useSimilarSearch);
     const stopWords = parseStopWords(payload.stopWords);
     const model = parseModel(payload.model);
 
@@ -209,7 +358,54 @@ export async function POST(req: Request) {
       (kw) => !stopWordsSet.has(kw.toLowerCase())
     );
     const amountRange = extractionResult.amountRange;
-    // キーワードがある場合はキーワードからembeddingを生成し、ベクトル検索を商品に特化させる
+
+    // 類似キーワード検索モード
+    if (useSimilarSearch && keywords.length > 0) {
+      // プライマリキーワードから類似キーワードを生成
+      const primaryKeyword = keywords[0]!;
+      const similarKeywords = await generateSimilarKeywords(primaryKeyword, model);
+
+      // 元のキーワード + 類似キーワードで検索
+      const allSearchKeywords = [primaryKeyword, ...similarKeywords];
+
+      // 並列検索実行
+      const searchResults = await executeParallelSearches({
+        keywords: allSearchKeywords,
+        topK: Math.ceil(topK * 1.5), // 各クエリで多めに取得
+        threshold,
+        amountMin: amountRange?.min,
+        amountMax: amountRange?.max,
+      });
+
+      // RRFでスコア統合
+      const rrfResults = calculateRRFScores(searchResults);
+
+      // 統計情報を計算
+      let totalCandidates = 0;
+      for (const results of searchResults.values()) {
+        totalCandidates += results.length;
+      }
+      const searchStats: SearchStats = {
+        queriesExecuted: searchResults.size,
+        totalCandidates,
+        uniqueResults: rrfResults.length,
+      };
+
+      // topK件に制限
+      const finalMatches = rrfResults.slice(0, topK);
+
+      return Response.json({
+        ok: true,
+        keywords,
+        similarKeywords,
+        amountRange,
+        queryText: history,
+        matches: finalMatches,
+        searchStats,
+      });
+    }
+
+    // 従来の検索モード
     const searchText = keywords.length > 0 ? keywords.join(" ") : history;
     const embedding = await generateTextEmbedding(searchText);
     const matches = await searchTextEmbeddings({

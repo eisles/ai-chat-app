@@ -22,12 +22,20 @@ type AmountRange = {
   max?: number | null;
 };
 
+type SearchStats = {
+  queriesExecuted: number;
+  totalCandidates: number;
+  uniqueResults: number;
+};
+
 type ApiResult = {
   ok: boolean;
   keywords?: string[];
+  similarKeywords?: string[];
   amountRange?: AmountRange | null;
   queryText?: string;
   matches?: Match[];
+  searchStats?: SearchStats;
   error?: string;
 };
 
@@ -36,6 +44,7 @@ export default function ChatRecommendPage() {
   const [topK, setTopK] = useState("10");
   const [threshold, setThreshold] = useState("0.6");
   const [useReranking, setUseReranking] = useState(true);
+  const [useSimilarSearch, setUseSimilarSearch] = useState(false);
   const [stopWordsInput, setStopWordsInput] = useState("");
   const [selectedModel, setSelectedModel] = useState("openai:gpt-4o-mini");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -64,6 +73,7 @@ export default function ChatRecommendPage() {
           topK: topK ? Number(topK) : undefined,
           threshold: threshold ? Number(threshold) : undefined,
           useReranking,
+          useSimilarSearch,
           stopWords: stopWordsInput
             .split(",")
             .map((w) => w.trim())
@@ -134,17 +144,31 @@ export default function ChatRecommendPage() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              id="useReranking"
-              checked={useReranking}
-              onChange={(e) => setUseReranking(e.target.checked)}
-              className="h-4 w-4 rounded border-gray-300"
-            />
-            <label htmlFor="useReranking" className="text-sm font-medium">
-              リランキングを使用
-            </label>
+          <div className="flex flex-col gap-2 sm:flex-row sm:gap-6">
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="useReranking"
+                checked={useReranking}
+                onChange={(e) => setUseReranking(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-300"
+              />
+              <label htmlFor="useReranking" className="text-sm font-medium">
+                リランキングを使用
+              </label>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="useSimilarSearch"
+                checked={useSimilarSearch}
+                onChange={(e) => setUseSimilarSearch(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-300"
+              />
+              <label htmlFor="useSimilarSearch" className="text-sm font-medium">
+                類似キーワード検索（RRF）
+              </label>
+            </div>
           </div>
 
           {useReranking && (
@@ -185,14 +209,26 @@ export default function ChatRecommendPage() {
                 <li>temperature: 0.2（低い値で安定した出力を生成）</li>
               </ul>
             </div>
-            <div>
-              <div className="font-medium mb-1">リランキング:</div>
-              <ul className="list-disc list-inside space-y-0.5">
-                <li>1番目のキーワードがマッチ: +0.2</li>
-                <li>1番目のキーワードがマッチしない: -0.1</li>
-                <li>その他のキーワードがマッチ: 各+0.03</li>
-              </ul>
-            </div>
+            {useSimilarSearch ? (
+              <div>
+                <div className="font-medium mb-1">類似キーワード検索（RRF）:</div>
+                <ul className="list-disc list-inside space-y-0.5">
+                  <li>プライマリキーワードから類似語を3つ生成</li>
+                  <li>4つのクエリで並列検索を実行</li>
+                  <li>Reciprocal Rank Fusion (RRF) でスコア統合</li>
+                  <li>複数クエリで上位に出る商品ほど高ランク</li>
+                </ul>
+              </div>
+            ) : (
+              <div>
+                <div className="font-medium mb-1">リランキング:</div>
+                <ul className="list-disc list-inside space-y-0.5">
+                  <li>1番目のキーワードがマッチ: +0.2</li>
+                  <li>1番目のキーワードがマッチしない: -0.1</li>
+                  <li>その他のキーワードがマッチ: 各+0.03</li>
+                </ul>
+              </div>
+            )}
           </div>
 
           <Button type="submit" className="w-full sm:w-auto" disabled={isSubmitting}>
@@ -208,6 +244,21 @@ export default function ChatRecommendPage() {
             <div className="mt-3 space-y-4 text-sm">
               <div className="space-y-1">
                 <div>keywords: {result.keywords?.join(" / ")}</div>
+                {result.similarKeywords && result.similarKeywords.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">類似キーワード:</span>
+                    <div className="flex flex-wrap gap-1">
+                      {result.similarKeywords.map((kw) => (
+                        <span
+                          key={kw}
+                          className="rounded-md bg-purple-100 px-2 py-0.5 text-purple-800 dark:bg-purple-900 dark:text-purple-200"
+                        >
+                          {kw}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {result.amountRange && (
                   <div className="flex items-center gap-2">
                     <span className="font-medium">金額フィルタ:</span>
@@ -222,6 +273,20 @@ export default function ChatRecommendPage() {
                     </span>
                   </div>
                 )}
+                {result.searchStats && (
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">検索統計:</span>
+                    <span className="rounded-md bg-green-100 px-2 py-0.5 text-green-800 dark:bg-green-900 dark:text-green-200">
+                      {result.searchStats.queriesExecuted}クエリ実行
+                    </span>
+                    <span className="rounded-md bg-green-100 px-2 py-0.5 text-green-800 dark:bg-green-900 dark:text-green-200">
+                      候補{result.searchStats.totalCandidates}件
+                    </span>
+                    <span className="rounded-md bg-green-100 px-2 py-0.5 text-green-800 dark:bg-green-900 dark:text-green-200">
+                      ユニーク{result.searchStats.uniqueResults}件
+                    </span>
+                  </div>
+                )}
                 <div className="whitespace-pre-wrap">
                   queryText: {result.queryText}
                 </div>
@@ -232,6 +297,11 @@ export default function ChatRecommendPage() {
                     <div className="rounded-md border bg-background/70 p-3" key={match.id}>
                       <div className="text-sm font-semibold">
                         score: {match.score.toFixed(4)}
+                        {result.searchStats && (
+                          <span className="ml-2 text-xs text-muted-foreground">
+                            (RRFスコア)
+                          </span>
+                        )}
                       </div>
                       <div className="mt-1 text-xs text-muted-foreground">
                         productId: {match.productId}
