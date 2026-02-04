@@ -8,6 +8,15 @@ import {
   createCompletion,
   LLMProviderError,
 } from "@/lib/llm-providers";
+import {
+  extractCategoriesFromMetadata,
+  getCategoryScoreAdjustment,
+  inferCategoryFromKeywords,
+  KNOWN_CATEGORIES,
+} from "@/lib/category-utils";
+import { searchByKeywords, searchByFullText } from "@/lib/keyword-search";
+import { rerankWithCohere, type RerankDocument } from "@/lib/reranker";
+import { executeHybridSearch } from "@/lib/hybrid-search";
 
 export const runtime = "nodejs";
 
@@ -35,6 +44,16 @@ type RecommendPayload = {
   threshold?: unknown;
   useReranking?: unknown;
   useSimilarSearch?: unknown;
+  useHybridSearch?: unknown;
+  useReranker?: unknown;
+  // 個別検索方式フラグ
+  useVectorSearch?: unknown;
+  useKeywordSearch?: unknown;
+  useFullTextSearch?: unknown;
+  useCategoryBoost?: unknown;
+  // 新しい3-Way Hybrid Search (Dense + Sparse + Keyword with RRF)
+  use3WayHybrid?: unknown;
+  useSparseSearch?: unknown;
   stopWords?: unknown;
   model?: unknown;
 };
@@ -74,6 +93,62 @@ function parseUseSimilarSearch(value: unknown) {
   return false;
 }
 
+function parseUseHybridSearch(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return true; // デフォルトで有効
+}
+
+function parseUseReranker(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return false; // デフォルトで無効（コスト考慮）
+}
+
+function parseUseVectorSearch(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return true; // デフォルトで有効
+}
+
+function parseUseKeywordSearch(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return true; // デフォルトで有効
+}
+
+function parseUseFullTextSearch(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return false; // デフォルトで無効（日本語は効果限定的）
+}
+
+function parseUseCategoryBoost(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return true; // デフォルトで有効
+}
+
+function parseUse3WayHybrid(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return false; // デフォルトで無効（既存動作を維持）
+}
+
+function parseUseSparseSearch(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return true; // デフォルトで有効
+}
+
 function parseStopWords(value: unknown) {
   if (Array.isArray(value)) {
     return value.map((w) => String(w).trim()).filter((w) => w.length > 0);
@@ -96,6 +171,7 @@ type AmountRange = {
 type KeywordExtractionResult = {
   keywords: string[];
   amountRange: AmountRange | null;
+  inferredCategory: string | null;
 };
 
 type SearchStats = {
@@ -105,21 +181,26 @@ type SearchStats = {
 };
 
 async function extractKeywords(history: string, model: string): Promise<KeywordExtractionResult> {
+  const categoryList = KNOWN_CATEGORIES.join(", ");
   const response = await createCompletion({
     model,
     messages: [
       {
         role: "system",
-        content: `Extract keywords and price range from Japanese text for product search.
+        content: `Extract keywords, price range, and product category from Japanese text for product search.
 
 Return ONLY valid JSON (no explanation text):
-{"keywords":["keyword1","keyword2"],"amountRange":null}
+{"keywords":["keyword1","keyword2"],"amountRange":null,"category":null}
+
+Category options: ${categoryList}
 
 Examples:
-- "牛肉の返礼品" → {"keywords":["牛肉"],"amountRange":null}
-- "5000円以下のお肉" → {"keywords":["お肉"],"amountRange":{"max":5000}}
-- "1万円くらいの海鮮" → {"keywords":["海鮮"],"amountRange":{"min":8500,"max":11500}}
-- "いちご 苺 ストロベリー" → {"keywords":["いちご","苺","ストロベリー"],"amountRange":null}
+- "牛肉の返礼品" → {"keywords":["牛肉"],"amountRange":null,"category":"肉"}
+- "5000円以下のお肉" → {"keywords":["お肉"],"amountRange":{"max":5000},"category":"肉"}
+- "1万円くらいの海鮮" → {"keywords":["海鮮"],"amountRange":{"min":8500,"max":11500},"category":"魚介"}
+- "いちご 苺 ストロベリー" → {"keywords":["いちご","苺","ストロベリー"],"amountRange":null,"category":"果物"}
+- "美味しいみかんを探して" → {"keywords":["みかん"],"amountRange":null,"category":"果物"}
+- "お酒が飲みたい" → {"keywords":["お酒"],"amountRange":null,"category":"酒"}
 
 Price rules:
 - "〜円以下" → {"max":N}
@@ -158,7 +239,8 @@ Price rules:
         keywords = obj.keywords.map((item) => String(item)).filter((item) => item.length > 0);
       } else if (Array.isArray(parsed)) {
         keywords = (parsed as unknown[]).map((item) => String(item)).filter((item) => item.length > 0);
-        return { keywords, amountRange: null };
+        const inferredCategory = inferCategoryFromKeywords(keywords);
+        return { keywords, amountRange: null, inferredCategory };
       }
 
       let amountRange: AmountRange | null = null;
@@ -171,20 +253,28 @@ Price rules:
         }
       }
 
-      return { keywords, amountRange };
+      // LLM推論カテゴリ、または辞書ベースのフォールバック
+      let inferredCategory: string | null = null;
+      if (typeof obj.category === "string" && obj.category.trim().length > 0) {
+        inferredCategory = obj.category.trim();
+      } else if (keywords.length > 0) {
+        inferredCategory = inferCategoryFromKeywords(keywords);
+      }
+
+      return { keywords, amountRange, inferredCategory };
     }
 
     if (Array.isArray(parsed)) {
-      return {
-        keywords: (parsed as unknown[]).map((item) => String(item)).filter((item) => item.length > 0),
-        amountRange: null,
-      };
+      const keywords = (parsed as unknown[]).map((item) => String(item)).filter((item) => item.length > 0);
+      const inferredCategory = inferCategoryFromKeywords(keywords);
+      return { keywords, amountRange: null, inferredCategory };
     }
   } catch {
     // fallback to non-JSON parsing
   }
 
-  return { keywords: fallbackKeywords, amountRange: null };
+  const inferredCategory = inferCategoryFromKeywords(fallbackKeywords);
+  return { keywords: fallbackKeywords, amountRange: null, inferredCategory };
 }
 
 // 類似キーワードをLLMで生成
@@ -347,12 +437,22 @@ export async function POST(req: Request) {
     const threshold = parseThreshold(payload.threshold);
     const useReranking = parseUseReranking(payload.useReranking);
     const useSimilarSearch = parseUseSimilarSearch(payload.useSimilarSearch);
+    const useHybridSearch = parseUseHybridSearch(payload.useHybridSearch);
+    const useReranker = parseUseReranker(payload.useReranker);
+    // 個別検索方式フラグ
+    const useVectorSearch = parseUseVectorSearch(payload.useVectorSearch);
+    const useKeywordSearch = parseUseKeywordSearch(payload.useKeywordSearch);
+    const useFullTextSearch = parseUseFullTextSearch(payload.useFullTextSearch);
+    const useCategoryBoost = parseUseCategoryBoost(payload.useCategoryBoost);
+    // 新しい3-Way Hybrid Search
+    const use3WayHybrid = parseUse3WayHybrid(payload.use3WayHybrid);
+    const useSparseSearch = parseUseSparseSearch(payload.useSparseSearch);
     const stopWords = parseStopWords(payload.stopWords);
     const model = parseModel(payload.model);
 
     const extractionResult = useReranking
       ? await extractKeywords(history, model)
-      : { keywords: [], amountRange: null };
+      : { keywords: [], amountRange: null, inferredCategory: null };
     const stopWordsSet = new Set(stopWords.map((w) => w.toLowerCase()));
     const keywords = extractionResult.keywords.filter(
       (kw) => !stopWordsSet.has(kw.toLowerCase())
@@ -398,6 +498,7 @@ export async function POST(req: Request) {
         ok: true,
         keywords,
         similarKeywords,
+        inferredCategory: extractionResult.inferredCategory,
         amountRange,
         queryText: history,
         matches: finalMatches,
@@ -405,7 +506,220 @@ export async function POST(req: Request) {
       });
     }
 
-    // 従来の検索モード
+    // 新しい3-Way Hybrid Search (Dense + Sparse + Keyword with RRF)
+    if (use3WayHybrid && keywords.length > 0) {
+      const hybridResult = await executeHybridSearch({
+        query: history,
+        keywords,
+        topK,
+        threshold,
+        useDenseSearch: useVectorSearch,
+        useSparseSearch,
+        useKeywordSearch,
+        useCategoryBoost,
+        amountMin: amountRange?.min,
+        amountMax: amountRange?.max,
+        inferredCategory: extractionResult.inferredCategory,
+      });
+
+      // 再ランキング（オプション）
+      let finalMatches = hybridResult.matches;
+      let reranked = false;
+
+      if (useReranker && finalMatches.length > 0) {
+        const rerankDocs: RerankDocument[] = finalMatches.map((m) => ({
+          text: m.text,
+          productId: m.productId,
+          originalScore: m.score,
+          metadata: m.metadata,
+        }));
+
+        const rerankResults = await rerankWithCohere(history, rerankDocs, topK);
+
+        finalMatches = rerankResults.map((r) => {
+          const original = finalMatches.find((m) => m.productId === r.productId)!;
+          return {
+            ...original,
+            score: r.combinedScore,
+          };
+        });
+        reranked = true;
+      }
+
+      return Response.json({
+        ok: true,
+        keywords,
+        inferredCategory: extractionResult.inferredCategory,
+        detectedCategory: hybridResult.searchStats.detectedCategory,
+        amountRange,
+        queryText: history,
+        matches: finalMatches,
+        searchMode: hybridResult.searchMode + (reranked ? "+reranker" : ""),
+        reranked,
+        searchStats: hybridResult.searchStats,
+        // クエリ分析結果（動的重み調整の詳細）
+        queryAnalysis: hybridResult.queryAnalysis,
+      });
+    }
+
+    // カスタム検索モード（個別フラグで検索方式を選択）
+    if (useHybridSearch && keywords.length > 0) {
+      const searchPromises: Promise<{ type: string; results: SearchMatch[] }>[] = [];
+
+      // 1. ベクトル検索
+      if (useVectorSearch) {
+        searchPromises.push(
+          (async () => {
+            const embedding = await generateTextEmbedding(keywords.join(" "));
+            const results = await searchTextEmbeddings({
+              embedding: embedding.vector,
+              topK: Math.ceil(topK * 2),
+              threshold,
+              amountMin: amountRange?.min,
+              amountMax: amountRange?.max,
+            });
+            return { type: "vector", results };
+          })()
+        );
+      }
+
+      // 2. キーワード検索（pg_trgm similarity）
+      if (useKeywordSearch) {
+        searchPromises.push(
+          (async () => {
+            const results = await searchByKeywords({
+              keywords,
+              topK: Math.ceil(topK * 2),
+              amountMin: amountRange?.min,
+              amountMax: amountRange?.max,
+            });
+            return { type: "keyword", results };
+          })()
+        );
+      }
+
+      // 3. 全文検索（tsvector + ts_rank）
+      if (useFullTextSearch) {
+        searchPromises.push(
+          (async () => {
+            const results = await searchByFullText({
+              query: keywords.join(" "),
+              topK: Math.ceil(topK * 2),
+              amountMin: amountRange?.min,
+              amountMax: amountRange?.max,
+            });
+            return { type: "fulltext", results };
+          })()
+        );
+      }
+
+      // 検索が1つも有効でない場合はベクトル検索にフォールバック
+      if (searchPromises.length === 0) {
+        const embedding = await generateTextEmbedding(keywords.join(" "));
+        const results = await searchTextEmbeddings({
+          embedding: embedding.vector,
+          topK,
+          threshold,
+          amountMin: amountRange?.min,
+          amountMax: amountRange?.max,
+        });
+        return Response.json({
+          ok: true,
+          keywords,
+          inferredCategory: extractionResult.inferredCategory,
+          amountRange,
+          queryText: history,
+          matches: results.slice(0, topK),
+          searchMode: "vector-only",
+          searchStats: { vectorResults: results.length },
+        });
+      }
+
+      // 並列実行
+      const searchResults = await Promise.all(searchPromises);
+
+      // RRFで統合
+      const searchResultsMap = new Map<string, SearchMatch[]>();
+      const searchStats: Record<string, number> = {};
+      for (const { type, results } of searchResults) {
+        searchResultsMap.set(type, results);
+        searchStats[`${type}Results`] = results.length;
+      }
+
+      const rrfResults = calculateRRFScores(searchResultsMap);
+
+      // カテゴリブーストを適用
+      const boostedResults = useCategoryBoost
+        ? rrfResults.map((match) => {
+            const categories = extractCategoriesFromMetadata(match.metadata);
+            const categoryAdjustment = getCategoryScoreAdjustment(
+              categories,
+              extractionResult.inferredCategory
+            );
+            return {
+              ...match,
+              score: match.score + categoryAdjustment,
+            };
+          })
+        : rrfResults;
+
+      // 再ソート
+      let sortedResults = boostedResults
+        .sort((a, b) => b.score - a.score)
+        .slice(0, topK * 3);
+
+      // 再ランキング（オプション）
+      let reranked = false;
+      if (useReranker && sortedResults.length > 0) {
+        const rerankDocs: RerankDocument[] = sortedResults.map((m) => ({
+          text: m.text,
+          productId: m.productId,
+          originalScore: m.score,
+          metadata: m.metadata,
+        }));
+
+        const rerankResults = await rerankWithCohere(history, rerankDocs, topK);
+
+        sortedResults = rerankResults.map((r) => {
+          const original = sortedResults.find(
+            (m) => m.productId === r.productId
+          )!;
+          return {
+            ...original,
+            score: r.combinedScore,
+          };
+        });
+        reranked = true;
+      }
+
+      // 最終結果
+      const finalMatches = sortedResults.slice(0, topK);
+
+      // 使用した検索方式を記録
+      const enabledMethods: string[] = [];
+      if (useVectorSearch) enabledMethods.push("vector");
+      if (useKeywordSearch) enabledMethods.push("keyword");
+      if (useFullTextSearch) enabledMethods.push("fulltext");
+      if (useCategoryBoost) enabledMethods.push("categoryBoost");
+      if (useReranker) enabledMethods.push("reranker");
+
+      return Response.json({
+        ok: true,
+        keywords,
+        inferredCategory: extractionResult.inferredCategory,
+        amountRange,
+        queryText: history,
+        matches: finalMatches,
+        searchMode: enabledMethods.join("+"),
+        reranked,
+        searchStats: {
+          ...searchStats,
+          mergedResults: rrfResults.length,
+        },
+      });
+    }
+
+    // 従来の検索モード（フォールバック）
     const searchText = keywords.length > 0 ? keywords.join(" ") : history;
     const embedding = await generateTextEmbedding(searchText);
     const matches = await searchTextEmbeddings({
@@ -447,6 +761,15 @@ export async function POST(req: Request) {
             boost += 0.03;
           }
         }
+
+        // カテゴリブースト: カテゴリが一致すれば+0.15、不一致なら-0.2
+        const categories = extractCategoriesFromMetadata(match.metadata);
+        const categoryAdjustment = getCategoryScoreAdjustment(
+          categories,
+          extractionResult.inferredCategory
+        );
+        boost += categoryAdjustment;
+
         return { ...match, score: Number(match.score) + boost };
       })
       .sort((a, b) => b.score - a.score);
@@ -456,6 +779,7 @@ export async function POST(req: Request) {
     return Response.json({
       ok: true,
       keywords,
+      inferredCategory: extractionResult.inferredCategory,
       amountRange,
       queryText: history,
       matches: finalMatches,
