@@ -23,19 +23,26 @@ type AmountRange = {
 };
 
 type SearchStats = {
-  queriesExecuted: number;
-  totalCandidates: number;
-  uniqueResults: number;
+  queriesExecuted?: number;
+  totalCandidates?: number;
+  uniqueResults?: number;
+  vectorResults?: number;
+  keywordResults?: number;
+  fulltextResults?: number;
+  mergedResults?: number;
 };
 
 type ApiResult = {
   ok: boolean;
   keywords?: string[];
   similarKeywords?: string[];
+  inferredCategory?: string | null;
   amountRange?: AmountRange | null;
   queryText?: string;
   matches?: Match[];
   searchStats?: SearchStats;
+  searchMode?: string;
+  reranked?: boolean;
   error?: string;
 };
 
@@ -45,6 +52,12 @@ export default function ChatRecommendPage() {
   const [threshold, setThreshold] = useState("0.6");
   const [useReranking, setUseReranking] = useState(true);
   const [useSimilarSearch, setUseSimilarSearch] = useState(false);
+  // 個別検索方式フラグ
+  const [useVectorSearch, setUseVectorSearch] = useState(true);
+  const [useKeywordSearch, setUseKeywordSearch] = useState(true);
+  const [useFullTextSearch, setUseFullTextSearch] = useState(false);
+  const [useCategoryBoost, setUseCategoryBoost] = useState(true);
+  const [useReranker, setUseReranker] = useState(false);
   const [stopWordsInput, setStopWordsInput] = useState("");
   const [selectedModel, setSelectedModel] = useState("openai:gpt-4o-mini");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -74,6 +87,13 @@ export default function ChatRecommendPage() {
           threshold: threshold ? Number(threshold) : undefined,
           useReranking,
           useSimilarSearch,
+          useHybridSearch: true,
+          // 個別検索方式フラグ
+          useVectorSearch,
+          useKeywordSearch,
+          useFullTextSearch,
+          useCategoryBoost,
+          useReranker,
           stopWords: stopWordsInput
             .split(",")
             .map((w) => w.trim())
@@ -144,31 +164,103 @@ export default function ChatRecommendPage() {
             </div>
           </div>
 
-          <div className="flex flex-col gap-2 sm:flex-row sm:gap-6">
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="useReranking"
-                checked={useReranking}
-                onChange={(e) => setUseReranking(e.target.checked)}
-                className="h-4 w-4 rounded border-gray-300"
-              />
-              <label htmlFor="useReranking" className="text-sm font-medium">
-                リランキングを使用
-              </label>
+          <div className="space-y-3">
+            <div className="text-sm font-medium">基本オプション</div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:gap-6">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="useReranking"
+                  checked={useReranking}
+                  onChange={(e) => setUseReranking(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                <label htmlFor="useReranking" className="text-sm font-medium">
+                  キーワード抽出
+                </label>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="useSimilarSearch"
+                  checked={useSimilarSearch}
+                  onChange={(e) => setUseSimilarSearch(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                <label htmlFor="useSimilarSearch" className="text-sm font-medium">
+                  類似キーワード検索
+                </label>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="useSimilarSearch"
-                checked={useSimilarSearch}
-                onChange={(e) => setUseSimilarSearch(e.target.checked)}
-                className="h-4 w-4 rounded border-gray-300"
-              />
-              <label htmlFor="useSimilarSearch" className="text-sm font-medium">
-                類似キーワード検索（RRF）
-              </label>
+          </div>
+
+          <div className="space-y-3">
+            <div className="text-sm font-medium">検索方式（比較用）</div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+              <div className="flex items-center gap-2 rounded-md border p-2">
+                <input
+                  type="checkbox"
+                  id="useVectorSearch"
+                  checked={useVectorSearch}
+                  onChange={(e) => setUseVectorSearch(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                <label htmlFor="useVectorSearch" className="text-xs font-medium">
+                  ベクトル検索
+                </label>
+              </div>
+              <div className="flex items-center gap-2 rounded-md border p-2">
+                <input
+                  type="checkbox"
+                  id="useKeywordSearch"
+                  checked={useKeywordSearch}
+                  onChange={(e) => setUseKeywordSearch(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                <label htmlFor="useKeywordSearch" className="text-xs font-medium">
+                  キーワード検索
+                </label>
+              </div>
+              <div className="flex items-center gap-2 rounded-md border p-2">
+                <input
+                  type="checkbox"
+                  id="useFullTextSearch"
+                  checked={useFullTextSearch}
+                  onChange={(e) => setUseFullTextSearch(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                <label htmlFor="useFullTextSearch" className="text-xs font-medium">
+                  全文検索
+                </label>
+              </div>
+              <div className="flex items-center gap-2 rounded-md border p-2">
+                <input
+                  type="checkbox"
+                  id="useCategoryBoost"
+                  checked={useCategoryBoost}
+                  onChange={(e) => setUseCategoryBoost(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                <label htmlFor="useCategoryBoost" className="text-xs font-medium">
+                  カテゴリブースト
+                </label>
+              </div>
+              <div className="flex items-center gap-2 rounded-md border p-2">
+                <input
+                  type="checkbox"
+                  id="useReranker"
+                  checked={useReranker}
+                  onChange={(e) => setUseReranker(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                <label htmlFor="useReranker" className="text-xs font-medium">
+                  Cohereリランカー
+                </label>
+              </div>
             </div>
+            <p className="text-xs text-muted-foreground">
+              複数選択でRRF統合。単独選択で各方式の結果を比較できます。
+            </p>
           </div>
 
           {useReranking && (
@@ -273,18 +365,55 @@ export default function ChatRecommendPage() {
                     </span>
                   </div>
                 )}
-                {result.searchStats && (
+                {result.inferredCategory && (
                   <div className="flex items-center gap-2">
+                    <span className="font-medium">推論カテゴリ:</span>
+                    <span className="rounded-md bg-orange-100 px-2 py-0.5 text-orange-800 dark:bg-orange-900 dark:text-orange-200">
+                      {result.inferredCategory}
+                    </span>
+                  </div>
+                )}
+                {result.searchMode && (
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">検索方式:</span>
+                    <span className="rounded-md bg-indigo-100 px-2 py-0.5 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200">
+                      {result.searchMode}
+                    </span>
+                    {result.reranked && (
+                      <span className="rounded-md bg-pink-100 px-2 py-0.5 text-pink-800 dark:bg-pink-900 dark:text-pink-200">
+                        リランク済
+                      </span>
+                    )}
+                  </div>
+                )}
+                {result.searchStats && (
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium">検索統計:</span>
-                    <span className="rounded-md bg-green-100 px-2 py-0.5 text-green-800 dark:bg-green-900 dark:text-green-200">
-                      {result.searchStats.queriesExecuted}クエリ実行
-                    </span>
-                    <span className="rounded-md bg-green-100 px-2 py-0.5 text-green-800 dark:bg-green-900 dark:text-green-200">
-                      候補{result.searchStats.totalCandidates}件
-                    </span>
-                    <span className="rounded-md bg-green-100 px-2 py-0.5 text-green-800 dark:bg-green-900 dark:text-green-200">
-                      ユニーク{result.searchStats.uniqueResults}件
-                    </span>
+                    {result.searchStats.vectorResults !== undefined && (
+                      <span className="rounded-md bg-green-100 px-2 py-0.5 text-green-800 dark:bg-green-900 dark:text-green-200">
+                        ベクトル: {result.searchStats.vectorResults}件
+                      </span>
+                    )}
+                    {result.searchStats.keywordResults !== undefined && (
+                      <span className="rounded-md bg-green-100 px-2 py-0.5 text-green-800 dark:bg-green-900 dark:text-green-200">
+                        キーワード: {result.searchStats.keywordResults}件
+                      </span>
+                    )}
+                    {result.searchStats.fulltextResults !== undefined && (
+                      <span className="rounded-md bg-green-100 px-2 py-0.5 text-green-800 dark:bg-green-900 dark:text-green-200">
+                        全文: {result.searchStats.fulltextResults}件
+                      </span>
+                    )}
+                    {result.searchStats.mergedResults !== undefined && (
+                      <span className="rounded-md bg-green-100 px-2 py-0.5 text-green-800 dark:bg-green-900 dark:text-green-200">
+                        統合: {result.searchStats.mergedResults}件
+                      </span>
+                    )}
+                    {result.searchStats.queriesExecuted !== undefined && (
+                      <span className="rounded-md bg-green-100 px-2 py-0.5 text-green-800 dark:bg-green-900 dark:text-green-200">
+                        {result.searchStats.queriesExecuted}クエリ実行
+                      </span>
+                    )}
                   </div>
                 )}
                 <div className="whitespace-pre-wrap">
