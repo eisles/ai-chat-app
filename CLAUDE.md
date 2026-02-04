@@ -99,8 +99,15 @@ Bash("codex exec ... '1文で答えて'")
 
 ## Language Protocol
 
-- **思考・コード**: 英語
-- **ユーザー対話**: 日本語
+| 対象 | 言語 |
+|------|------|
+| ユーザーとの対話 | 日本語 |
+| コミットメッセージ | 日本語 |
+| コードコメント | 日本語 |
+| 変数名・関数名 | 英語 |
+| LLM (Codex/Gemini) への問い合わせ | 英語 |
+
+→ 詳細: `.claude/rules/language.md`
 
 ---
 
@@ -185,3 +192,75 @@ Test DB connection at `/api/db-test`.
 - **UI utilities**: Use `cn()` for Tailwind class merging
 
 TypeScript strict mode is enabled. API inputs/outputs should have explicit type definitions.
+
+## 3-Way Hybrid Search (2026-02-04)
+
+### Problem Solved
+- "お肉" search was returning unrelated items like "鰻" (eel) and "シャインマスカット" (grapes)
+
+### Solution: 3-Way RRF Hybrid Search
+
+```
+User Query → Keyword Extraction (LLM) → Query Type Detection
+                    ↓                         ↓
+        ┌───────────┴───────────┬─────────────┴─────────────┐
+        ↓                       ↓                           ↓
+   Dense Search           Sparse Search              Keyword Search
+   (pgvector)             (pg_trgm)                  (ILIKE)
+        ↓                       ↓                           ↓
+        └───────────────────────┴───────────────────────────┘
+                                ↓
+                    RRF Score Fusion (k=40-80)
+                    score = Σ weight_i / (k + rank_i)
+                                ↓
+                    Category Boosting
+                    (+0.15 match / -0.1 mismatch)
+                                ↓
+                    Optional: Cohere Rerank
+                                ↓
+                            Final Results
+```
+
+### Dynamic Weights by Query Type
+
+| Query Type | Dense | Sparse | Keyword | RRF K |
+|------------|-------|--------|---------|-------|
+| keyword (short, ≤4 chars) | 0.20 | 0.50 | 0.30 | 40 |
+| keyword (normal) | 0.30 | 0.40 | 0.30 | 40 |
+| conceptual | 0.55 | 0.25 | 0.20 | 80 |
+| mixed | 0.40 | 0.35 | 0.25 | 60 |
+
+### Core Files
+- `lib/hybrid-search.ts` - 3-Way RRF integration (main entry)
+- `lib/sparse-search.ts` - pg_trgm-based text similarity
+- `lib/query-analyzer.ts` - Query type detection & dynamic weights
+- `lib/keyword-search.ts` - ILIKE keyword matching
+- `lib/category-utils.ts` - Category inference and boosting
+- `lib/reranker.ts` - Cohere Rerank integration (optional)
+
+### API Parameters (`/api/chat-recommend`)
+```typescript
+{
+  history: string;              // User query
+  use3WayHybrid?: boolean;      // Enable 3-Way RRF (default: false)
+  useSparseSearch?: boolean;    // pg_trgm search (default: true with 3-Way)
+  useKeywordSearch?: boolean;   // ILIKE search (default: true)
+  useCategoryBoost?: boolean;   // Category boosting (default: true)
+  useReranker?: boolean;        // Cohere rerank (default: false)
+}
+```
+
+### Environment Variables (Optional)
+```
+COHERE_API_KEY  # For reranking
+```
+
+### DB Migrations Required
+1. `migrations/001_add_vector_indexes.sql` - HNSW vector index
+2. `migrations/002_add_sparse_search_support.sql` - **CRITICAL**
+   - Adds `search_text` column (name + categories + description)
+   - Creates GIN index for pg_trgm on search_text
+   - Creates `category_keywords` table
+
+### Documentation
+- Full plan: `.claude/docs/HYBRID_SEARCH_IMPLEMENTATION_PLAN.md`
