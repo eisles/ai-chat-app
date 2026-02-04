@@ -38,6 +38,7 @@ type SearchStats = {
   keywordResults?: number;
   fulltextResults?: number;
   mergedResults?: number;
+  threshold?: number;
 };
 
 type ApiResult = {
@@ -477,6 +478,11 @@ export default function ChatRecommendPage() {
                     {result.searchStats.queriesExecuted !== undefined && (
                       <span className="rounded-md bg-green-100 px-2 py-0.5 text-green-800 dark:bg-green-900 dark:text-green-200">
                         {result.searchStats.queriesExecuted}クエリ実行
+                      </span>
+                    )}
+                    {result.searchStats.threshold !== undefined && (
+                      <span className="rounded-md bg-gray-100 px-2 py-0.5 text-gray-800 dark:bg-gray-700 dark:text-gray-200">
+                        閾値: {result.searchStats.threshold}
                       </span>
                     )}
                   </div>

@@ -178,6 +178,7 @@ type SearchStats = {
   queriesExecuted: number;
   totalCandidates: number;
   uniqueResults: number;
+  threshold?: number;
 };
 
 // RRFスコアの内訳
@@ -513,6 +514,7 @@ export async function POST(req: Request) {
         queriesExecuted: searchResults.size,
         totalCandidates,
         uniqueResults: rrfResults.length,
+        threshold,
       };
 
       // topK件に制限
@@ -580,7 +582,7 @@ export async function POST(req: Request) {
         matches: finalMatches,
         searchMode: hybridResult.searchMode + (reranked ? "+reranker" : ""),
         reranked,
-        searchStats: hybridResult.searchStats,
+        searchStats: { ...hybridResult.searchStats, threshold },
         // クエリ分析結果（動的重み調整の詳細）
         queryAnalysis: hybridResult.queryAnalysis,
       });
@@ -655,7 +657,7 @@ export async function POST(req: Request) {
           queryText: history,
           matches: results.slice(0, topK),
           searchMode: "vector-only",
-          searchStats: { vectorResults: results.length },
+          searchStats: { vectorResults: results.length, threshold },
         });
       }
 
@@ -750,6 +752,7 @@ export async function POST(req: Request) {
         searchStats: {
           ...searchStats,
           mergedResults: rrfResults.length,
+          threshold,
         },
       });
     }
@@ -818,6 +821,7 @@ export async function POST(req: Request) {
       amountRange,
       queryText: history,
       matches: finalMatches,
+      searchStats: { threshold },
     });
   } catch (error) {
     return errorResponse(error);
