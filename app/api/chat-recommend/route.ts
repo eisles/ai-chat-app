@@ -180,6 +180,19 @@ type SearchStats = {
   uniqueResults: number;
 };
 
+// RRFスコアの内訳
+type RRFBreakdown = {
+  source: string;       // 検索方式名（vector, keyword, fulltext）
+  rank: number;         // その検索での順位（0-indexed）
+  contribution: number; // RRFスコアへの貢献値
+  originalScore: number; // 元の検索スコア
+};
+
+// 内訳付きのSearchMatch
+type SearchMatchWithBreakdown = SearchMatch & {
+  rrfBreakdown?: RRFBreakdown[];
+};
+
 async function extractKeywords(history: string, model: string): Promise<KeywordExtractionResult> {
   const categoryList = KNOWN_CATEGORIES.join(", ");
   const response = await createCompletion({
@@ -374,18 +387,28 @@ async function executeParallelSearches(options: {
 function calculateRRFScores(
   searchResults: Map<string, SearchMatch[]>,
   k: number = RRF_K
-): SearchMatch[] {
-  const scores = new Map<string, { match: SearchMatch; rrfScore: number; sources: string[] }>();
+): SearchMatchWithBreakdown[] {
+  const scores = new Map<string, {
+    match: SearchMatch;
+    rrfScore: number;
+    breakdown: RRFBreakdown[];
+  }>();
 
-  for (const [queryKeyword, results] of searchResults) {
+  for (const [source, results] of searchResults) {
     results.forEach((match, rank) => {
       const key = match.productId;
-      const rrfContribution = 1 / (k + rank + 1);
+      const contribution = 1 / (k + rank + 1);
+      const breakdownEntry: RRFBreakdown = {
+        source,
+        rank,
+        contribution,
+        originalScore: match.score,
+      };
 
       if (scores.has(key)) {
         const existing = scores.get(key)!;
-        existing.rrfScore += rrfContribution;
-        existing.sources.push(queryKeyword);
+        existing.rrfScore += contribution;
+        existing.breakdown.push(breakdownEntry);
         // より高い元スコアを保持
         if (match.score > existing.match.score) {
           existing.match = { ...match };
@@ -393,8 +416,8 @@ function calculateRRFScores(
       } else {
         scores.set(key, {
           match: { ...match },
-          rrfScore: rrfContribution,
-          sources: [queryKeyword],
+          rrfScore: contribution,
+          breakdown: [breakdownEntry],
         });
       }
     });
@@ -403,9 +426,10 @@ function calculateRRFScores(
   // RRFスコアでソートして返す
   return Array.from(scores.values())
     .sort((a, b) => b.rrfScore - a.rrfScore)
-    .map(({ match, rrfScore }) => ({
+    .map(({ match, rrfScore, breakdown }) => ({
       ...match,
       score: rrfScore,
+      rrfBreakdown: breakdown,
     }));
 }
 
@@ -656,9 +680,20 @@ export async function POST(req: Request) {
               categories,
               extractionResult.inferredCategory
             );
+            // 内訳にカテゴリブーストを追加
+            const updatedBreakdown = [
+              ...(match.rrfBreakdown ?? []),
+              {
+                source: "categoryBoost",
+                rank: 0,
+                contribution: categoryAdjustment,
+                originalScore: 0,
+              },
+            ];
             return {
               ...match,
               score: match.score + categoryAdjustment,
+              rrfBreakdown: updatedBreakdown,
             };
           })
         : rrfResults;

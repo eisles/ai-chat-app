@@ -7,6 +7,13 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useEffect, useState } from "react";
 
+type RRFBreakdown = {
+  source: string;
+  rank: number;
+  contribution: number;
+  originalScore: number;
+};
+
 type Match = {
   id: string;
   productId: string;
@@ -15,6 +22,7 @@ type Match = {
   metadata: Record<string, unknown> | null;
   score: number;
   amount: number | null;
+  rrfBreakdown?: RRFBreakdown[];
 };
 
 type AmountRange = {
@@ -58,18 +66,28 @@ export default function ChatRecommendPage() {
   const [useFullTextSearch, setUseFullTextSearch] = useState(false);
   const [useCategoryBoost, setUseCategoryBoost] = useState(true);
   const [useReranker, setUseReranker] = useState(false);
+  const [cohereAvailable, setCohereAvailable] = useState<boolean | null>(null);
   const [stopWordsInput, setStopWordsInput] = useState("");
   const [selectedModel, setSelectedModel] = useState("openai:gpt-4o-mini");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [result, setResult] = useState<ApiResult | null>(null);
 
   useEffect(() => {
+    // ストップワード取得
     fetch("/api/chat-recommend/stop-words")
       .then((res) => res.json())
       .then((data: { stopWords?: string[] }) => {
         setStopWordsInput((data.stopWords ?? []).join(", "));
       })
       .catch(() => {});
+
+    // Cohere APIの利用可否を取得
+    fetch("/api/chat-recommend/status")
+      .then((res) => res.json())
+      .then((data: { cohereRerankerAvailable?: boolean }) => {
+        setCohereAvailable(data.cohereRerankerAvailable ?? false);
+      })
+      .catch(() => setCohereAvailable(false));
   }, []);
 
   async function handleSubmit(event: React.FormEvent) {
@@ -245,21 +263,38 @@ export default function ChatRecommendPage() {
                   カテゴリブースト
                 </label>
               </div>
-              <div className="flex items-center gap-2 rounded-md border p-2">
+              <div
+                className={`flex items-center gap-2 rounded-md border p-2 ${
+                  cohereAvailable === false ? "opacity-50 bg-muted" : ""
+                }`}
+                title={cohereAvailable === false ? "COHERE_API_KEY が設定されていません" : ""}
+              >
                 <input
                   type="checkbox"
                   id="useReranker"
                   checked={useReranker}
                   onChange={(e) => setUseReranker(e.target.checked)}
-                  className="h-4 w-4 rounded border-gray-300"
+                  disabled={cohereAvailable === false}
+                  className="h-4 w-4 rounded border-gray-300 disabled:cursor-not-allowed"
                 />
-                <label htmlFor="useReranker" className="text-xs font-medium">
+                <label
+                  htmlFor="useReranker"
+                  className={`text-xs font-medium ${cohereAvailable === false ? "cursor-not-allowed" : ""}`}
+                >
                   Cohereリランカー
+                  {cohereAvailable === false && (
+                    <span className="ml-1 text-red-500" title="APIキー未設定">⚠</span>
+                  )}
                 </label>
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
               複数選択でRRF統合。単独選択で各方式の結果を比較できます。
+              {cohereAvailable === false && (
+                <span className="block mt-1 text-amber-600 dark:text-amber-400">
+                  ※ Cohereリランカーは COHERE_API_KEY 未設定のため無効です
+                </span>
+              )}
             </p>
           </div>
 
@@ -284,43 +319,73 @@ export default function ChatRecommendPage() {
             </>
           )}
 
-          <div className="rounded-md bg-muted/50 p-3 text-xs text-muted-foreground space-y-2">
-            <div>
-              <div className="font-medium mb-1">ベクトル検索:</div>
-              <ul className="list-disc list-inside space-y-0.5">
-                <li>検索クエリ: キーワードがあればキーワード、なければ履歴全体</li>
-                <li>Embedding: text-embedding-3-small</li>
-                <li>類似度: コサイン距離</li>
-              </ul>
-            </div>
-            <div>
-              <div className="font-medium mb-1">キーワード生成:</div>
-              <ul className="list-disc list-inside space-y-0.5">
-                <li>リランキング使用時のみ生成</li>
-                <li>モデル: {selectedModel}</li>
-                <li>temperature: 0.2（低い値で安定した出力を生成）</li>
-              </ul>
-            </div>
-            {useSimilarSearch ? (
-              <div>
-                <div className="font-medium mb-1">類似キーワード検索（RRF）:</div>
-                <ul className="list-disc list-inside space-y-0.5">
-                  <li>プライマリキーワードから類似語を3つ生成</li>
-                  <li>4つのクエリで並列検索を実行</li>
-                  <li>Reciprocal Rank Fusion (RRF) でスコア統合</li>
-                  <li>複数クエリで上位に出る商品ほど高ランク</li>
+          <div className="rounded-md bg-muted/50 p-3 text-xs text-muted-foreground space-y-3">
+            <div className="font-medium text-sm text-foreground">検索方式の仕様</div>
+
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="rounded border bg-blue-50 p-2 dark:bg-blue-950">
+                <div className="font-medium text-blue-800 dark:text-blue-200 flex items-center gap-1">
+                  <span className="inline-block w-3 h-3 rounded bg-blue-500"></span>
+                  ベクトル検索
+                </div>
+                <ul className="mt-1 space-y-0.5 text-blue-700 dark:text-blue-300">
+                  <li>• OpenAI text-embedding-3-small</li>
+                  <li>• コサイン類似度で意味的検索</li>
+                  <li>• 「お肉」→「牛肉」「豚肉」もヒット</li>
                 </ul>
               </div>
-            ) : (
-              <div>
-                <div className="font-medium mb-1">リランキング:</div>
-                <ul className="list-disc list-inside space-y-0.5">
-                  <li>1番目のキーワードがマッチ: +0.2</li>
-                  <li>1番目のキーワードがマッチしない: -0.1</li>
-                  <li>その他のキーワードがマッチ: 各+0.03</li>
+
+              <div className="rounded border bg-green-50 p-2 dark:bg-green-950">
+                <div className="font-medium text-green-800 dark:text-green-200 flex items-center gap-1">
+                  <span className="inline-block w-3 h-3 rounded bg-green-500"></span>
+                  キーワード検索
+                </div>
+                <ul className="mt-1 space-y-0.5 text-green-700 dark:text-green-300">
+                  <li>• pg_trgm + ILIKE</li>
+                  <li>• 文字列の部分一致</li>
+                  <li>• 「牛肉」→「牛肉」のみヒット</li>
                 </ul>
               </div>
-            )}
+
+              <div className="rounded border bg-yellow-50 p-2 dark:bg-yellow-950">
+                <div className="font-medium text-yellow-800 dark:text-yellow-200 flex items-center gap-1">
+                  <span className="inline-block w-3 h-3 rounded bg-yellow-500"></span>
+                  全文検索
+                </div>
+                <ul className="mt-1 space-y-0.5 text-yellow-700 dark:text-yellow-300">
+                  <li>• PostgreSQL tsvector</li>
+                  <li>• 形態素解析ベース</li>
+                  <li>• 日本語は効果限定的</li>
+                </ul>
+              </div>
+            </div>
+
+            <div className="border-t pt-3">
+              <div className="font-medium text-sm text-foreground mb-2">RRFスコアの内訳の見方</div>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="rounded bg-blue-100 px-1.5 py-0.5 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
+                    vector[4位] +0.0156
+                  </span>
+                  <span>= ベクトル検索で4番目にヒット、RRFスコアに+0.0156貢献</span>
+                </div>
+                <div className="mt-2 space-y-0.5">
+                  <div>• <strong>RRF計算式</strong>: score = 1 / (k + rank + 1)　※k=60</div>
+                  <div>• <strong>1位</strong>: 1/(60+0+1) = 0.0164</div>
+                  <div>• <strong>5位</strong>: 1/(60+4+1) = 0.0154</div>
+                  <div>• <strong>複数検索でヒット</strong>すると各貢献値が加算され上位に</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="border-t pt-3">
+              <div className="font-medium text-sm text-foreground mb-1">その他のオプション</div>
+              <div className="space-y-0.5">
+                <div>• <strong>カテゴリブースト</strong>: 推論カテゴリと商品カテゴリが一致で+0.15、不一致で-0.1</div>
+                <div>• <strong>Cohereリランカー</strong>: Cohere Rerank API（rerank-multilingual-v3.0）で関連性を再評価。COHERE_API_KEY未設定時は無効</div>
+                <div>• <strong>類似キーワード検索</strong>: 「牛肉」→「和牛」「黒毛和牛」「ビーフ」も同時検索</div>
+              </div>
+            </div>
           </div>
 
           <Button type="submit" className="w-full sm:w-auto" disabled={isSubmitting}>
@@ -426,12 +491,42 @@ export default function ChatRecommendPage() {
                     <div className="rounded-md border bg-background/70 p-3" key={match.id}>
                       <div className="text-sm font-semibold">
                         score: {match.score.toFixed(4)}
-                        {result.searchStats && (
+                        {(result.searchStats || match.rrfBreakdown) && (
                           <span className="ml-2 text-xs text-muted-foreground">
                             (RRFスコア)
                           </span>
                         )}
                       </div>
+                      {match.rrfBreakdown && match.rrfBreakdown.length > 0 && (
+                        <div className="mt-1 flex flex-wrap items-center gap-1">
+                          <span className="text-xs text-muted-foreground">内訳:</span>
+                          {match.rrfBreakdown.map((b, i) => (
+                            <span
+                              key={`${b.source}-${i}`}
+                              className={`rounded px-1.5 py-0.5 text-xs ${
+                                b.source === "vector"
+                                  ? "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
+                                  : b.source === "keyword"
+                                    ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                                    : b.source === "fulltext"
+                                      ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
+                                      : b.source === "categoryBoost"
+                                        ? b.contribution >= 0
+                                          ? "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200"
+                                          : "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
+                                        : "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200"
+                              }`}
+                              title={b.source === "categoryBoost"
+                                ? `カテゴリ${b.contribution >= 0 ? "一致" : "不一致"}`
+                                : `元スコア: ${b.originalScore.toFixed(4)}`}
+                            >
+                              {b.source === "categoryBoost"
+                                ? `カテゴリ ${b.contribution >= 0 ? "+" : ""}${b.contribution.toFixed(4)}`
+                                : `${b.source}[${b.rank + 1}位] +${b.contribution.toFixed(4)}`}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       <div className="mt-1 text-xs text-muted-foreground">
                         productId: {match.productId}
                       </div>
