@@ -364,17 +364,44 @@ export default function ChatRecommendPage() {
             <div className="border-t pt-3">
               <div className="font-medium text-sm text-foreground mb-2">RRFスコアの内訳の見方</div>
               <div className="space-y-1">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="rounded bg-blue-100 px-1.5 py-0.5 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
-                    vector[4位] +0.0156
+                    vector[4位] +0.0156 (0.7825)
                   </span>
-                  <span>= ベクトル検索で4番目にヒット、RRFスコアに+0.0156貢献</span>
+                  <span>= ベクトル検索で4番目にヒット、RRF貢献+0.0156、元スコア0.7825</span>
                 </div>
                 <div className="mt-2 space-y-0.5">
                   <div>• <strong>RRF計算式</strong>: score = 1 / (k + rank + 1)　※k=60</div>
                   <div>• <strong>1位</strong>: 1/(60+0+1) = 0.0164</div>
                   <div>• <strong>5位</strong>: 1/(60+4+1) = 0.0154</div>
                   <div>• <strong>複数検索でヒット</strong>すると各貢献値が加算され上位に</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="border-t pt-3">
+              <div className="font-medium text-sm text-foreground mb-2">括弧内の元スコアの意味</div>
+              <div className="space-y-1.5">
+                <div className="flex items-start gap-2">
+                  <span className="rounded bg-blue-100 px-1.5 py-0.5 text-xs text-blue-800 dark:bg-blue-900 dark:text-blue-200 shrink-0">
+                    vector
+                  </span>
+                  <span><strong>コサイン類似度</strong>（0〜1）: 意味的な近さ。1に近いほど類似</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="rounded bg-green-100 px-1.5 py-0.5 text-xs text-green-800 dark:bg-green-900 dark:text-green-200 shrink-0">
+                    keyword
+                  </span>
+                  <span><strong>pg_trgm similarity</strong>（0〜1）: キーワードとテキスト全体のトライグラム類似度。短いキーワードが長いテキストにマッチすると低くなる</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="rounded bg-yellow-100 px-1.5 py-0.5 text-xs text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 shrink-0">
+                    fulltext
+                  </span>
+                  <span><strong>ts_rank</strong>（0〜）: PostgreSQL全文検索のランクスコア。単語の出現頻度に基づく</span>
+                </div>
+                <div className="mt-1 text-muted-foreground text-xs">
+                  ※ キーワード検索の元スコアが低くても、ILIKEでマッチしていればRRFランキングに貢献します
                 </div>
               </div>
             </div>
