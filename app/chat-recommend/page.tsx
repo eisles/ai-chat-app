@@ -528,7 +528,7 @@ export default function ChatRecommendPage() {
                             >
                               {b.source === "categoryBoost"
                                 ? `カテゴリ ${b.contribution >= 0 ? "+" : ""}${b.contribution.toFixed(4)}`
-                                : `${b.source}[${b.rank + 1}位] +${b.contribution.toFixed(4)}`}
+                                : `${b.source}[${b.rank + 1}位] +${b.contribution.toFixed(4)} (${b.originalScore.toFixed(4)})`}
                             </span>
                           ))}
                         </div>
