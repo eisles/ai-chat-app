@@ -5,7 +5,36 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import Image from "next/image";
 import { useEffect, useState } from "react";
+
+// 商品詳細URLを構築
+function buildProductUrl(productId: string, cityCode: string | null): string {
+  if (cityCode) {
+    return `https://www.furusato-tax.jp/product/detail/${cityCode}/${productId}`;
+  }
+  return `https://www.furusato-tax.jp/search?q=${productId}`;
+}
+
+// metadata.rawから商品情報を取得
+function extractProductInfo(metadata: Record<string, unknown> | null): {
+  name: string | null;
+  image: string | null;
+} {
+  if (!metadata) {
+    return { name: null, image: null };
+  }
+
+  const raw = metadata.raw as Record<string, unknown> | undefined;
+  if (!raw) {
+    return { name: null, image: null };
+  }
+
+  return {
+    name: typeof raw.name === "string" ? raw.name : null,
+    image: typeof raw.image === "string" ? raw.image : null,
+  };
+}
 
 type RRFBreakdown = {
   source: string;
@@ -58,7 +87,7 @@ type ApiResult = {
 export default function ChatRecommendPage() {
   const [history, setHistory] = useState("");
   const [topK, setTopK] = useState("10");
-  const [threshold, setThreshold] = useState("0.6");
+  const [threshold, setThreshold] = useState("0.35");
   const [useReranking, setUseReranking] = useState(true);
   const [useSimilarSearch, setUseSimilarSearch] = useState(false);
   // 個別検索方式フラグ
@@ -72,6 +101,7 @@ export default function ChatRecommendPage() {
   const [selectedModel, setSelectedModel] = useState("openai:gpt-4o-mini");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [result, setResult] = useState<ApiResult | null>(null);
+  const [displayMode, setDisplayMode] = useState<"debug" | "product">("debug");
 
   useEffect(() => {
     // ストップワード取得
@@ -520,63 +550,171 @@ export default function ChatRecommendPage() {
               </div>
               {result.matches && result.matches.length > 0 ? (
                 <div className="space-y-3">
-                  {result.matches.map((match) => (
-                    <div className="rounded-md border bg-background/70 p-3" key={match.id}>
-                      <div className="text-sm font-semibold">
-                        score: {match.score.toFixed(4)}
-                        {(result.searchStats || match.rrfBreakdown) && (
-                          <span className="ml-2 text-xs text-muted-foreground">
-                            (RRFスコア)
-                          </span>
-                        )}
-                      </div>
-                      {match.rrfBreakdown && match.rrfBreakdown.length > 0 && (
-                        <div className="mt-1 flex flex-wrap items-center gap-1">
-                          <span className="text-xs text-muted-foreground">内訳:</span>
-                          {match.rrfBreakdown.map((b, i) => (
-                            <span
-                              key={`${b.source}-${i}`}
-                              className={`rounded px-1.5 py-0.5 text-xs ${
-                                b.source === "vector"
-                                  ? "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
-                                  : b.source === "keyword"
-                                    ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
-                                    : b.source === "fulltext"
-                                      ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
-                                      : b.source === "categoryBoost"
-                                        ? b.contribution >= 0
-                                          ? "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200"
-                                          : "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
-                                        : "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200"
-                              }`}
-                              title={b.source === "categoryBoost"
-                                ? `カテゴリ${b.contribution >= 0 ? "一致" : "不一致"}`
-                                : `元スコア: ${b.originalScore.toFixed(4)}`}
-                            >
-                              {b.source === "categoryBoost"
-                                ? `カテゴリ ${b.contribution >= 0 ? "+" : ""}${b.contribution.toFixed(4)}`
-                                : `${b.source}[${b.rank + 1}位] +${b.contribution.toFixed(4)} (${b.originalScore.toFixed(4)})`}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        productId: {match.productId}
-                      </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        cityCode: {match.cityCode ?? "-"}
-                      </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        金額: {match.amount ? `${match.amount.toLocaleString()}円` : "-"}
-                      </div>
-                      <div className="mt-2 text-sm">{match.text}</div>
-                      {match.metadata && (
-                        <pre className="mt-2 whitespace-pre-wrap rounded bg-muted/50 p-2 text-xs">
-                          {JSON.stringify(match.metadata, null, 2)}
-                        </pre>
-                      )}
+                  {/* 表示切り替えトグル */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium">表示モード:</span>
+                    <div className="flex rounded-lg border p-1">
+                      <button
+                        type="button"
+                        onClick={() => setDisplayMode("debug")}
+                        className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
+                          displayMode === "debug"
+                            ? "bg-primary text-primary-foreground"
+                            : "text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        デバッグ表示
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDisplayMode("product")}
+                        className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
+                          displayMode === "product"
+                            ? "bg-primary text-primary-foreground"
+                            : "text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        商品カード表示
+                      </button>
                     </div>
-                  ))}
+                  </div>
+
+                  {displayMode === "debug" ? (
+                    // デバッグ表示（従来表示）
+                    <div className="space-y-3">
+                      {result.matches.map((match) => (
+                        <div className="rounded-md border bg-background/70 p-3" key={match.id}>
+                          <div className="text-sm font-semibold">
+                            score: {match.score.toFixed(4)}
+                            {(result.searchStats || match.rrfBreakdown) && (
+                              <span className="ml-2 text-xs text-muted-foreground">
+                                (RRFスコア)
+                              </span>
+                            )}
+                          </div>
+                          {match.rrfBreakdown && match.rrfBreakdown.length > 0 && (
+                            <div className="mt-1 flex flex-wrap items-center gap-1">
+                              <span className="text-xs text-muted-foreground">内訳:</span>
+                              {match.rrfBreakdown.map((b, i) => (
+                                <span
+                                  key={`${b.source}-${i}`}
+                                  className={`rounded px-1.5 py-0.5 text-xs ${
+                                    b.source === "vector"
+                                      ? "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
+                                      : b.source === "keyword"
+                                        ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                                        : b.source === "fulltext"
+                                          ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
+                                          : b.source === "categoryBoost"
+                                            ? b.contribution >= 0
+                                              ? "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200"
+                                              : "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
+                                            : "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200"
+                                  }`}
+                                  title={b.source === "categoryBoost"
+                                    ? `カテゴリ${b.contribution >= 0 ? "一致" : "不一致"}`
+                                    : `元スコア: ${b.originalScore.toFixed(4)}`}
+                                >
+                                  {b.source === "categoryBoost"
+                                    ? `カテゴリ ${b.contribution >= 0 ? "+" : ""}${b.contribution.toFixed(4)}`
+                                    : `${b.source}[${b.rank + 1}位] +${b.contribution.toFixed(4)} (${b.originalScore.toFixed(4)})`}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            productId: {match.productId}
+                          </div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            cityCode: {match.cityCode ?? "-"}
+                          </div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            金額: {match.amount ? `${match.amount.toLocaleString()}円` : "-"}
+                          </div>
+                          <div className="mt-2 text-sm">{match.text}</div>
+                          {match.metadata && (
+                            <pre className="mt-2 whitespace-pre-wrap rounded bg-muted/50 p-2 text-xs">
+                              {JSON.stringify(match.metadata, null, 2)}
+                            </pre>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    // 商品カード表示
+                    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                      {result.matches.map((match) => {
+                        const { name, image } = extractProductInfo(match.metadata);
+                        const productUrl = buildProductUrl(match.productId, match.cityCode);
+                        const displayName = name || `商品ID: ${match.productId}`;
+
+                        return (
+                          <div
+                            key={match.id}
+                            className="overflow-hidden rounded-lg border bg-background/70 shadow-sm transition-shadow hover:shadow-md"
+                          >
+                            {/* 商品画像 */}
+                            <div className="relative aspect-[4/3] bg-muted">
+                              {image ? (
+                                <Image
+                                  src={image}
+                                  alt={displayName}
+                                  fill
+                                  className="object-cover"
+                                  sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+                                  onError={(e) => {
+                                    // 画像読み込みエラー時はフォールバック表示
+                                    const target = e.currentTarget;
+                                    target.style.display = "none";
+                                    const fallback = target.parentElement?.querySelector(".image-fallback");
+                                    if (fallback) {
+                                      (fallback as HTMLElement).style.display = "flex";
+                                    }
+                                  }}
+                                />
+                              ) : null}
+                              <div
+                                className={`image-fallback absolute inset-0 items-center justify-center bg-muted text-4xl ${
+                                  image ? "hidden" : "flex"
+                                }`}
+                              >
+                                📦
+                              </div>
+                            </div>
+
+                            {/* 商品情報 */}
+                            <div className="p-3">
+                              {/* 商品タイトル（リンク） */}
+                              <a
+                                href={productUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="line-clamp-2 text-sm font-medium hover:text-primary hover:underline"
+                                title={displayName}
+                              >
+                                {displayName}
+                                <span className="ml-1 inline-block text-xs text-muted-foreground">
+                                  ↗
+                                </span>
+                              </a>
+
+                              {/* 金額 */}
+                              <div className="mt-2 text-lg font-bold text-primary">
+                                {match.amount
+                                  ? `${match.amount.toLocaleString()}円`
+                                  : "金額未設定"}
+                              </div>
+
+                              {/* スコア（小さく表示） */}
+                              <div className="mt-1 text-xs text-muted-foreground">
+                                スコア: {match.score.toFixed(4)}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="rounded-md bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
