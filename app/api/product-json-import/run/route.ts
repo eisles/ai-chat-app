@@ -175,19 +175,54 @@ async function processProductItem(options: {
     source: "product_json",
   });
 
+  // メイン画像のキャプション抽出
   if (product.image && product.image.trim()) {
-    const dataUrl = await imageUrlToDataUrl(product.image);
-    const caption = await generateCaption(dataUrl);
-    await registerTextEntry({
-      text: caption,
-      metadata: { source: "image_caption", imageUrl: product.image },
-      productId,
-      cityCode: product.city_code ?? undefined,
-      source: "image_caption",
-      useSourceInHash: true,
-    });
+    try {
+      const dataUrl = await imageUrlToDataUrl(product.image);
+      const caption = await generateCaption(dataUrl);
+      await registerTextEntry({
+        text: caption,
+        metadata: { source: "image_caption", imageUrl: product.image, slideIndex: 0 },
+        productId,
+        cityCode: product.city_code ?? undefined,
+        source: "image_caption",
+        useSourceInHash: true,
+      });
+    } catch (error) {
+      // メイン画像のエラーは警告として記録し、処理を継続
+      console.warn(`Failed to process main image for product ${productId}:`, error);
+    }
   }
 
+  // スライド画像のキャプション抽出（slide_image1〜slide_image8）
+  for (let i = 0; i < slideImageUrls.length; i++) {
+    const slideUrl = slideImageUrls[i];
+    if (!slideUrl || !slideUrl.trim()) {
+      continue;
+    }
+
+    try {
+      const dataUrl = await imageUrlToDataUrl(slideUrl);
+      const caption = await generateCaption(dataUrl);
+      await registerTextEntry({
+        text: caption,
+        metadata: {
+          source: "slide_image_caption",
+          imageUrl: slideUrl,
+          slideIndex: i + 1,
+        },
+        productId,
+        cityCode: product.city_code ?? undefined,
+        source: `slide_image_caption_${i + 1}`,
+        useSourceInHash: true,
+      });
+    } catch (error) {
+      // スライド画像のエラーは警告として記録し、処理を継続
+      console.warn(`Failed to process slide_image${i + 1} for product ${productId}:`, error);
+    }
+  }
+
+  // 画像ベクトル化（CLIP embeddings）
   await vectorizeProductImages({
     productId,
     cityCode: product.city_code ?? null,
