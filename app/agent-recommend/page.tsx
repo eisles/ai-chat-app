@@ -90,16 +90,22 @@ const budgetOptions = [
   "30,001円以上",
 ];
 
+// KNOWN_CATEGORIES (lib/category-utils.ts) と同期
 const categoryOptions = [
   "肉",
   "魚介",
-  "米・パン",
-  "果物・野菜",
-  "乳製品・卵",
-  "お酒・飲料",
-  "加工品・惣菜",
-  "雑貨・日用品",
-  "体験・宿泊",
+  "果物",
+  "野菜",
+  "米",
+  "酒",
+  "スイーツ",
+  "加工品",
+  "調味料",
+  "飲料",
+  "工芸品",
+  "雑貨",
+  "旅行",
+  "体験",
 ];
 
 const purposeOptions = [
