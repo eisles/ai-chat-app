@@ -86,7 +86,8 @@ export default function ProductJsonImportPage() {
   } | null>(null);
   const [backfillError, setBackfillError] = useState<string | null>(null);
   // フィルタ用のstate
-  const [filterCityCode, setFilterCityCode] = useState("");
+  const [filterCityCodeFrom, setFilterCityCodeFrom] = useState("");
+  const [filterCityCodeTo, setFilterCityCodeTo] = useState("");
   const [filterProductIdFrom, setFilterProductIdFrom] = useState("");
   const [filterProductIdTo, setFilterProductIdTo] = useState("");
 
@@ -129,7 +130,8 @@ export default function ProductJsonImportPage() {
           limit: parseInt(backfillLimit, 10) || 5,
           skipExisting: true,
           // フィルタ条件
-          cityCode: filterCityCode || undefined,
+          cityCodeFrom: filterCityCodeFrom || undefined,
+          cityCodeTo: filterCityCodeTo || undefined,
           productIdFrom: filterProductIdFrom || undefined,
           productIdTo: filterProductIdTo || undefined,
         }),
@@ -427,16 +429,29 @@ export default function ProductJsonImportPage() {
             <div className="text-sm font-medium mb-2">フィルタ条件（任意）</div>
             <div className="flex flex-wrap items-end gap-3">
               <div className="space-y-1">
-                <label htmlFor="filterCityCode" className="text-xs text-muted-foreground">
-                  市区町村コード
+                <label htmlFor="filterCityCodeFrom" className="text-xs text-muted-foreground">
+                  市区町村コード（From）
                 </label>
                 <input
-                  id="filterCityCode"
+                  id="filterCityCodeFrom"
                   type="text"
                   placeholder="例: 011002"
-                  value={filterCityCode}
-                  onChange={(e) => setFilterCityCode(e.target.value)}
-                  className="w-28 rounded-md border bg-background px-2 py-1.5 text-sm"
+                  value={filterCityCodeFrom}
+                  onChange={(e) => setFilterCityCodeFrom(e.target.value)}
+                  className="w-24 rounded-md border bg-background px-2 py-1.5 text-sm"
+                />
+              </div>
+              <div className="space-y-1">
+                <label htmlFor="filterCityCodeTo" className="text-xs text-muted-foreground">
+                  市区町村コード（To）
+                </label>
+                <input
+                  id="filterCityCodeTo"
+                  type="text"
+                  placeholder="例: 019999"
+                  value={filterCityCodeTo}
+                  onChange={(e) => setFilterCityCodeTo(e.target.value)}
+                  className="w-24 rounded-md border bg-background px-2 py-1.5 text-sm"
                 />
               </div>
               <div className="space-y-1">
@@ -467,7 +482,7 @@ export default function ProductJsonImportPage() {
               </div>
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
-              ※ 指定しない場合は全データが対象になります。商品IDは文字列比較されます。
+              ※ 指定しない場合は全データが対象になります。コード・IDは文字列比較されます。
             </p>
           </div>
 

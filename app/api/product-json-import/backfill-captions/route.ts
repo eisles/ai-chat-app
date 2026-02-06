@@ -34,6 +34,8 @@ type BackfillPayload = {
   // フィルタ条件
   cityCode?: unknown;        // 市区町村コード（完全一致）
   cityCodePrefix?: unknown;  // 市区町村コード（前方一致）
+  cityCodeFrom?: unknown;    // 市区町村コード（この値以上）
+  cityCodeTo?: unknown;      // 市区町村コード（この値以下）
   productIdFrom?: unknown;   // 商品ID（この値以上）
   productIdTo?: unknown;     // 商品ID（この値以下）
 };
@@ -160,6 +162,8 @@ async function checkExistingCaption(
 type ProductFilter = {
   cityCode?: string | null;
   cityCodePrefix?: string | null;
+  cityCodeFrom?: string | null;
+  cityCodeTo?: string | null;
   productIdFrom?: string | null;
   productIdTo?: string | null;
 };
@@ -173,6 +177,8 @@ async function getProductsWithImages(
   // フィルタ条件を構築
   const cityCode = filter?.cityCode ?? null;
   const cityCodePrefix = filter?.cityCodePrefix ?? null;
+  const cityCodeFrom = filter?.cityCodeFrom ?? null;
+  const cityCodeTo = filter?.cityCodeTo ?? null;
   const productIdFrom = filter?.productIdFrom ?? null;
   const productIdTo = filter?.productIdTo ?? null;
 
@@ -198,6 +204,8 @@ async function getProductsWithImages(
       )
       ${cityCode ? db`AND city_code = ${cityCode}` : db``}
       ${cityCodePrefix ? db`AND city_code LIKE ${cityCodePrefix + '%'}` : db``}
+      ${cityCodeFrom ? db`AND city_code >= ${cityCodeFrom}` : db``}
+      ${cityCodeTo ? db`AND city_code <= ${cityCodeTo}` : db``}
       ${productIdFrom ? db`AND product_id >= ${productIdFrom}` : db``}
       ${productIdTo ? db`AND product_id <= ${productIdTo}` : db``}
     ORDER BY product_id, created_at DESC
@@ -359,6 +367,8 @@ export async function POST(req: Request) {
     const filter: ProductFilter = {
       cityCode: parseStringOrNull(payload.cityCode),
       cityCodePrefix: parseStringOrNull(payload.cityCodePrefix),
+      cityCodeFrom: parseStringOrNull(payload.cityCodeFrom),
+      cityCodeTo: parseStringOrNull(payload.cityCodeTo),
       productIdFrom: parseStringOrNull(payload.productIdFrom),
       productIdTo: parseStringOrNull(payload.productIdTo),
     };
