@@ -81,53 +81,71 @@ class OpenAIError extends Error {
   }
 }
 
+// 初期化フラグ（プロセス内で一度だけ実行）
+let dbInitPromise: Promise<ReturnType<typeof getDb>> | null = null;
+
 async function ensureTextEmbeddingsTable() {
   const db = getDb();
-  await db`create extension if not exists vector`;
-  await db`
-    create table if not exists product_text_embeddings (
-      id uuid primary key,
-      product_id varchar(20) not null,
-      city_code varchar(10),
-      text text not null,
-      text_source text,
-      embedding vector(1536) not null,
-      embedding_length integer,
-      embedding_bytes integer,
-      embedding_ms integer,
-      model text,
-      dim integer,
-      normalized boolean,
-      metadata jsonb,
-      text_hash text unique,
-      created_at timestamptz default now(),
-      updated_at timestamptz default now()
-    );
-  `;
-  await db`
-    alter table product_text_embeddings
-    add column if not exists city_code varchar(10)
-  `;
-  await db`
-    alter table product_text_embeddings
-    add column if not exists text_source text
-  `;
-  await db`
-    drop index if exists product_text_embeddings_product_id_idx
-  `;
-  await db`
-    create index if not exists product_text_embeddings_product_id_idx
-      on product_text_embeddings(product_id)
-  `;
-  await db`
-    alter table product_text_embeddings
-    add column if not exists amount integer
-  `;
-  await db`
-    create index if not exists product_text_embeddings_amount_idx
-      on product_text_embeddings(amount)
-  `;
-  return db;
+
+  // 既に初期化済み or 初期化中の場合はスキップ
+  if (dbInitPromise) {
+    return dbInitPromise;
+  }
+
+  // 初期化を開始（Promise を保存して同時実行を防ぐ）
+  dbInitPromise = (async () => {
+    try {
+      await db`create extension if not exists vector`;
+      await db`
+        create table if not exists product_text_embeddings (
+          id uuid primary key,
+          product_id varchar(20) not null,
+          city_code varchar(10),
+          text text not null,
+          text_source text,
+          embedding vector(1536) not null,
+          embedding_length integer,
+          embedding_bytes integer,
+          embedding_ms integer,
+          model text,
+          dim integer,
+          normalized boolean,
+          metadata jsonb,
+          text_hash text unique,
+          created_at timestamptz default now(),
+          updated_at timestamptz default now()
+        );
+      `;
+      await db`
+        alter table product_text_embeddings
+        add column if not exists city_code varchar(10)
+      `;
+      await db`
+        alter table product_text_embeddings
+        add column if not exists text_source text
+      `;
+      // DROP INDEX を削除（IF NOT EXISTS で十分、競合の原因になる）
+      await db`
+        create index if not exists product_text_embeddings_product_id_idx
+          on product_text_embeddings(product_id)
+      `;
+      await db`
+        alter table product_text_embeddings
+        add column if not exists amount integer
+      `;
+      await db`
+        create index if not exists product_text_embeddings_amount_idx
+          on product_text_embeddings(amount)
+      `;
+      return db;
+    } catch (error) {
+      // エラー時は再初期化を許可
+      dbInitPromise = null;
+      throw error;
+    }
+  })();
+
+  return dbInitPromise;
 }
 
 export function hashText(text: string, source?: string) {

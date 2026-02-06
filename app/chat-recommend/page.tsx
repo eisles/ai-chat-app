@@ -437,11 +437,39 @@ export default function ChatRecommendPage() {
             </div>
 
             <div className="border-t pt-3">
+              <div className="font-medium text-sm text-foreground mb-2">類似キーワード検索の仕様</div>
+              <div className="rounded border bg-purple-50 p-2 dark:bg-purple-950 mb-3">
+                <div className="font-medium text-purple-800 dark:text-purple-200 flex items-center gap-1">
+                  <span className="inline-block w-3 h-3 rounded bg-purple-500"></span>
+                  類似キーワード検索モード
+                </div>
+                <div className="mt-2 space-y-1.5 text-purple-700 dark:text-purple-300">
+                  <div className="font-medium">処理フロー:</div>
+                  <ol className="list-decimal list-inside space-y-0.5 ml-2">
+                    <li>入力から<strong>プライマリキーワード</strong>を抽出（例: 「牛肉」）</li>
+                    <li>LLMで<strong>類似キーワード3件</strong>を生成（例: 「和牛」「黒毛和牛」「ビーフ」）</li>
+                    <li>プライマリ + 類似で<strong>4並列ベクトル検索</strong>を実行</li>
+                    <li><strong>RRF</strong>でスコアを統合（複数検索でヒットした商品が上位に）</li>
+                  </ol>
+                  <div className="mt-2 font-medium">特徴:</div>
+                  <ul className="space-y-0.5 ml-2">
+                    <li>• 類似キーワードは<strong>ベクトル検索のみ</strong>で使用（キーワード検索・全文検索は対象外）</li>
+                    <li>• 同義語・表記揺れ（ひらがな/カタカナ/漢字）を自動カバー</li>
+                    <li>• 検索統計の「N クエリ実行」で実行クエリ数を確認可能</li>
+                  </ul>
+                  <div className="mt-2 font-medium">例:</div>
+                  <div className="ml-2 space-y-0.5">
+                    <div>「いちご」→ 苺, ストロベリー, イチゴ</div>
+                    <div>「海鮮」→ 魚介, シーフード, 海の幸</div>
+                    <div>「みかん」→ ミカン, 蜜柑, オレンジ</div>
+                  </div>
+                </div>
+              </div>
+
               <div className="font-medium text-sm text-foreground mb-1">その他のオプション</div>
               <div className="space-y-0.5">
                 <div>• <strong>カテゴリブースト</strong>: 推論カテゴリと商品カテゴリが一致で+0.15、不一致で-0.1</div>
                 <div>• <strong>Cohereリランカー</strong>: Cohere Rerank API（rerank-multilingual-v3.0）で関連性を再評価。COHERE_API_KEY未設定時は無効</div>
-                <div>• <strong>類似キーワード検索</strong>: 「牛肉」→「和牛」「黒毛和牛」「ビーフ」も同時検索</div>
               </div>
             </div>
           </div>
