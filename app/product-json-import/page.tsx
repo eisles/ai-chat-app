@@ -38,6 +38,32 @@ type JobResponse = {
   error?: string;
 };
 
+type BackfillStats = {
+  totalProducts: number;
+  productsWithImages: number;
+  existingCaptions: number;
+  pendingCaptions: number;
+};
+
+type BackfillResult = {
+  productId: string;
+  processed: number;
+  skipped: number;
+  errors: string[];
+};
+
+type BackfillResponse = {
+  ok: boolean;
+  stats?: BackfillStats;
+  results?: BackfillResult[];
+  summary?: {
+    totalProcessed: number;
+    totalSkipped: number;
+    totalErrors: number;
+  };
+  error?: string;
+};
+
 export default function ProductJsonImportPage() {
   const [file, setFile] = useState<File | null>(null);
   const [job, setJob] = useState<Job | null>(null);
@@ -47,6 +73,22 @@ export default function ProductJsonImportPage() {
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const isTicking = useRef(false);
+
+  // バックフィル用のstate
+  const [backfillStats, setBackfillStats] = useState<BackfillStats | null>(null);
+  const [backfillLimit, setBackfillLimit] = useState("5");
+  const [isBackfillRunning, setIsBackfillRunning] = useState(false);
+  const [backfillResults, setBackfillResults] = useState<BackfillResult[]>([]);
+  const [backfillSummary, setBackfillSummary] = useState<{
+    totalProcessed: number;
+    totalSkipped: number;
+    totalErrors: number;
+  } | null>(null);
+  const [backfillError, setBackfillError] = useState<string | null>(null);
+  // フィルタ用のstate
+  const [filterCityCode, setFilterCityCode] = useState("");
+  const [filterProductIdFrom, setFilterProductIdFrom] = useState("");
+  const [filterProductIdTo, setFilterProductIdTo] = useState("");
 
   async function fetchStatus(jobId: string) {
     const res = await fetch(`/api/product-json-import?jobId=${jobId}`);
@@ -58,6 +100,59 @@ export default function ProductJsonImportPage() {
     setFailedItems(data.failedItems ?? []);
     setProcessingItems(data.processingItems ?? []);
   }
+
+  async function fetchBackfillStats() {
+    try {
+      const res = await fetch("/api/product-json-import/backfill-captions");
+      const data = (await res.json()) as BackfillResponse;
+      if (!data.ok) {
+        throw new Error(data.error ?? "統計取得に失敗しました");
+      }
+      setBackfillStats(data.stats ?? null);
+      setBackfillError(null);
+    } catch (err) {
+      setBackfillError(err instanceof Error ? err.message : "統計取得に失敗しました");
+    }
+  }
+
+  async function runBackfill() {
+    setIsBackfillRunning(true);
+    setBackfillError(null);
+    setBackfillResults([]);
+    setBackfillSummary(null);
+
+    try {
+      const res = await fetch("/api/product-json-import/backfill-captions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          limit: parseInt(backfillLimit, 10) || 5,
+          skipExisting: true,
+          // フィルタ条件
+          cityCode: filterCityCode || undefined,
+          productIdFrom: filterProductIdFrom || undefined,
+          productIdTo: filterProductIdTo || undefined,
+        }),
+      });
+      const data = (await res.json()) as BackfillResponse;
+      if (!data.ok) {
+        throw new Error(data.error ?? "バックフィル処理に失敗しました");
+      }
+      setBackfillResults(data.results ?? []);
+      setBackfillSummary(data.summary ?? null);
+      // 統計を更新
+      await fetchBackfillStats();
+    } catch (err) {
+      setBackfillError(err instanceof Error ? err.message : "バックフィル処理に失敗しました");
+    } finally {
+      setIsBackfillRunning(false);
+    }
+  }
+
+  // 初回読み込み時にバックフィル統計を取得
+  useEffect(() => {
+    fetchBackfillStats();
+  }, []);
 
   async function handleUpload(event: React.FormEvent) {
     event.preventDefault();
@@ -291,6 +386,187 @@ export default function ProductJsonImportPage() {
           {error}
         </Card>
       )}
+
+      {/* 画像キャプションバックフィル */}
+      <Card className="border bg-card/60 p-4 shadow-sm sm:p-6">
+        <h2 className="text-lg font-semibold">画像キャプション バックフィル</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          既存データから画像を取得し、LLMでキャプションを生成してベクトルDBに登録します。
+        </p>
+
+        {/* 統計情報 */}
+        {backfillStats && (
+          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="rounded-md border bg-muted/30 p-3 text-center">
+              <div className="text-2xl font-bold">{backfillStats.totalProducts.toLocaleString()}</div>
+              <div className="text-xs text-muted-foreground">総商品数</div>
+            </div>
+            <div className="rounded-md border bg-muted/30 p-3 text-center">
+              <div className="text-2xl font-bold">{backfillStats.productsWithImages.toLocaleString()}</div>
+              <div className="text-xs text-muted-foreground">画像あり</div>
+            </div>
+            <div className="rounded-md border bg-green-50 dark:bg-green-950 p-3 text-center">
+              <div className="text-2xl font-bold text-green-700 dark:text-green-300">
+                {backfillStats.existingCaptions.toLocaleString()}
+              </div>
+              <div className="text-xs text-muted-foreground">キャプション済</div>
+            </div>
+            <div className="rounded-md border bg-orange-50 dark:bg-orange-950 p-3 text-center">
+              <div className="text-2xl font-bold text-orange-700 dark:text-orange-300">
+                {backfillStats.pendingCaptions.toLocaleString()}
+              </div>
+              <div className="text-xs text-muted-foreground">未処理（概算）</div>
+            </div>
+          </div>
+        )}
+
+        {/* 実行コントロール */}
+        <div className="mt-4 space-y-3">
+          {/* フィルタ条件 */}
+          <div className="rounded-md border bg-muted/20 p-3">
+            <div className="text-sm font-medium mb-2">フィルタ条件（任意）</div>
+            <div className="flex flex-wrap items-end gap-3">
+              <div className="space-y-1">
+                <label htmlFor="filterCityCode" className="text-xs text-muted-foreground">
+                  市区町村コード
+                </label>
+                <input
+                  id="filterCityCode"
+                  type="text"
+                  placeholder="例: 011002"
+                  value={filterCityCode}
+                  onChange={(e) => setFilterCityCode(e.target.value)}
+                  className="w-28 rounded-md border bg-background px-2 py-1.5 text-sm"
+                />
+              </div>
+              <div className="space-y-1">
+                <label htmlFor="filterProductIdFrom" className="text-xs text-muted-foreground">
+                  商品ID（From）
+                </label>
+                <input
+                  id="filterProductIdFrom"
+                  type="text"
+                  placeholder="例: 1000"
+                  value={filterProductIdFrom}
+                  onChange={(e) => setFilterProductIdFrom(e.target.value)}
+                  className="w-24 rounded-md border bg-background px-2 py-1.5 text-sm"
+                />
+              </div>
+              <div className="space-y-1">
+                <label htmlFor="filterProductIdTo" className="text-xs text-muted-foreground">
+                  商品ID（To）
+                </label>
+                <input
+                  id="filterProductIdTo"
+                  type="text"
+                  placeholder="例: 2000"
+                  value={filterProductIdTo}
+                  onChange={(e) => setFilterProductIdTo(e.target.value)}
+                  className="w-24 rounded-md border bg-background px-2 py-1.5 text-sm"
+                />
+              </div>
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              ※ 指定しない場合は全データが対象になります。商品IDは文字列比較されます。
+            </p>
+          </div>
+
+          {/* 実行ボタン */}
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="space-y-1">
+              <label htmlFor="backfillLimit" className="text-sm font-medium">
+                処理商品数
+              </label>
+              <input
+                id="backfillLimit"
+                type="number"
+                min="1"
+                max="50"
+                value={backfillLimit}
+                onChange={(e) => setBackfillLimit(e.target.value)}
+                className="w-20 rounded-md border bg-background px-3 py-2 text-sm"
+              />
+            </div>
+            <Button
+            type="button"
+            onClick={runBackfill}
+            disabled={isBackfillRunning}
+          >
+            {isBackfillRunning ? "処理中..." : "バックフィル実行"}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={fetchBackfillStats}
+          >
+            統計更新
+          </Button>
+          </div>
+        </div>
+
+        <p className="mt-2 text-xs text-muted-foreground">
+          ※ 1商品あたり最大9画像（メイン + スライド8枚）を処理します。OpenAI API呼び出しが発生します。
+        </p>
+
+        {/* 実行結果 */}
+        {backfillSummary && (
+          <div className="mt-4 rounded-md border bg-muted/30 p-3">
+            <div className="font-medium">実行結果</div>
+            <div className="mt-2 flex flex-wrap gap-4 text-sm">
+              <div>
+                <span className="text-green-600 dark:text-green-400 font-bold">
+                  {backfillSummary.totalProcessed}
+                </span>
+                <span className="ml-1 text-muted-foreground">件処理</span>
+              </div>
+              <div>
+                <span className="text-gray-600 dark:text-gray-400 font-bold">
+                  {backfillSummary.totalSkipped}
+                </span>
+                <span className="ml-1 text-muted-foreground">件スキップ</span>
+              </div>
+              <div>
+                <span className="text-red-600 dark:text-red-400 font-bold">
+                  {backfillSummary.totalErrors}
+                </span>
+                <span className="ml-1 text-muted-foreground">件エラー</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 詳細結果 */}
+        {backfillResults.length > 0 && (
+          <div className="mt-3 max-h-60 overflow-y-auto rounded-md border bg-background/50 p-2 text-xs">
+            {backfillResults.map((result) => (
+              <div
+                key={result.productId}
+                className="flex items-center gap-2 border-b py-1 last:border-b-0"
+              >
+                <span className="font-mono">{result.productId}</span>
+                <span className="text-green-600 dark:text-green-400">
+                  +{result.processed}
+                </span>
+                {result.skipped > 0 && (
+                  <span className="text-gray-500">skip:{result.skipped}</span>
+                )}
+                {result.errors.length > 0 && (
+                  <span className="text-red-500" title={result.errors.join(", ")}>
+                    err:{result.errors.length}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* エラー表示 */}
+        {backfillError && (
+          <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+            {backfillError}
+          </div>
+        )}
+      </Card>
     </div>
   );
 }

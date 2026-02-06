@@ -31,6 +31,11 @@ class ApiError extends Error {
 type BackfillPayload = {
   limit?: unknown;
   skipExisting?: unknown;
+  // フィルタ条件
+  cityCode?: unknown;        // 市区町村コード（完全一致）
+  cityCodePrefix?: unknown;  // 市区町村コード（前方一致）
+  productIdFrom?: unknown;   // 商品ID（この値以上）
+  productIdTo?: unknown;     // 商品ID（この値以下）
 };
 
 type ProductWithImages = {
@@ -152,8 +157,25 @@ async function checkExistingCaption(
   return rows.length > 0;
 }
 
-async function getProductsWithImages(limit: number): Promise<ProductWithImages[]> {
+type ProductFilter = {
+  cityCode?: string | null;
+  cityCodePrefix?: string | null;
+  productIdFrom?: string | null;
+  productIdTo?: string | null;
+};
+
+async function getProductsWithImages(
+  limit: number,
+  filter?: ProductFilter
+): Promise<ProductWithImages[]> {
   const db = getDb();
+
+  // フィルタ条件を構築
+  const cityCode = filter?.cityCode ?? null;
+  const cityCodePrefix = filter?.cityCodePrefix ?? null;
+  const productIdFrom = filter?.productIdFrom ?? null;
+  const productIdTo = filter?.productIdTo ?? null;
+
   const rows = (await db`
     SELECT DISTINCT ON (product_id)
       product_id,
@@ -174,6 +196,10 @@ async function getProductsWithImages(limit: number): Promise<ProductWithImages[]
         OR metadata->'raw'->>'slide_image7' IS NOT NULL
         OR metadata->'raw'->>'slide_image8' IS NOT NULL
       )
+      ${cityCode ? db`AND city_code = ${cityCode}` : db``}
+      ${cityCodePrefix ? db`AND city_code LIKE ${cityCodePrefix + '%'}` : db``}
+      ${productIdFrom ? db`AND product_id >= ${productIdFrom}` : db``}
+      ${productIdTo ? db`AND product_id <= ${productIdTo}` : db``}
     ORDER BY product_id, created_at DESC
     LIMIT ${limit}
   `) as ProductWithImages[];
@@ -316,13 +342,28 @@ function errorResponse(error: unknown) {
   return Response.json({ ok: false, error: message }, { status: 500 });
 }
 
+function parseStringOrNull(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+  return null;
+}
+
 export async function POST(req: Request) {
   try {
     const payload = (await req.json()) as BackfillPayload;
     const limit = parseLimit(payload.limit);
     const skipExisting = parseSkipExisting(payload.skipExisting);
 
-    const products = await getProductsWithImages(limit);
+    // フィルタ条件をパース
+    const filter: ProductFilter = {
+      cityCode: parseStringOrNull(payload.cityCode),
+      cityCodePrefix: parseStringOrNull(payload.cityCodePrefix),
+      productIdFrom: parseStringOrNull(payload.productIdFrom),
+      productIdTo: parseStringOrNull(payload.productIdTo),
+    };
+
+    const products = await getProductsWithImages(limit, filter);
 
     if (products.length === 0) {
       return Response.json({
