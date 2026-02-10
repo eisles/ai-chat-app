@@ -2,11 +2,49 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const generateTextEmbedding = vi.fn();
 const searchTextEmbeddings = vi.fn();
+const createCompletion = vi.fn();
+
+const db = vi.fn(async (strings: TemplateStringsArray) => {
+  const sql = strings.join(" ");
+  if (sql.includes("create extension if not exists vector")) {
+    return [];
+  }
+  if (sql.includes("from public.product_images_vectorize")) {
+    return [
+      {
+        id: "img-1",
+        city_code: null,
+        product_id: "p-1",
+        slide_index: 0,
+        image_url: "https://example.com/a.jpg",
+        distance: 0.12,
+      },
+    ];
+  }
+  return [];
+});
 
 vi.mock("@/lib/image-text-search", () => ({
   generateTextEmbedding,
   searchTextEmbeddings,
   assertOpenAIError: () => null,
+}));
+
+vi.mock("@/lib/llm-providers", () => ({
+  createCompletion,
+  getModelById: () => ({ supportsVision: true }),
+  LLMProviderError: class LLMProviderError extends Error {
+    status: number;
+
+    constructor(message: string, status: number) {
+      super(message);
+      this.status = status;
+    }
+  },
+}));
+
+vi.mock("@/lib/neon", () => ({
+  getDb: () => db,
 }));
 
 process.env.OPENAI_API_KEY = "test-key";
@@ -15,7 +53,8 @@ const { POST } = await import("@/app/api/image-search/route");
 
 describe("POST /api/image-search", () => {
   beforeEach(() => {
-    vi.resetAllMocks();
+    // db などのモック実装を保持したいので resetAllMocks は使わない
+    vi.clearAllMocks();
   });
 
   it("returns 400 when file is missing", async () => {
@@ -46,12 +85,16 @@ describe("POST /api/image-search", () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,
       json: async () => ({
-        choices: [{ message: { content: "説明文" } }],
+        embedding: new Array(512).fill(0.1),
+        model: "vectorize",
+        dim: 512,
+        normalized: null,
       }),
       text: async () => "",
     }));
     vi.stubGlobal("fetch", fetchMock);
 
+    createCompletion.mockResolvedValue({ content: "説明文" });
     generateTextEmbedding.mockResolvedValue({
       vector: [0.1, 0.2],
       model: "text-embedding-test",

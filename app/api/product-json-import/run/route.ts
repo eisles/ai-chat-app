@@ -2,15 +2,22 @@ import {
   claimPendingItems,
   getImportJob,
   markItemFailure,
+  markItemSkipped,
   markItemSuccess,
   updateJobStatus,
 } from "@/lib/product-json-import";
 import {
   buildProductEmbeddingText,
+  checkExistingProductTextSource,
+  getExistingProductIdsForSource,
+  deleteProductTextEntries,
   registerTextEntry,
   type ProductPayload,
 } from "@/lib/image-text-search";
-import { vectorizeProductImages } from "@/lib/vectorize-product-images";
+import {
+  deleteProductImagesVectorize,
+  vectorizeProductImages,
+} from "@/lib/vectorize-product-images";
 
 export const runtime = "nodejs";
 
@@ -129,7 +136,20 @@ async function processProductItem(options: {
   productJson: string;
   productId: string | null;
   cityCode: string | null;
-}) {
+  existingBehavior: "skip" | "delete_then_insert";
+}): Promise<"processed" | "skipped"> {
+  // product_id がCSV列で提供されている場合は、JSONパース前にスキップ判定できる
+  if (
+    options.existingBehavior === "skip" &&
+    options.productId &&
+    (await checkExistingProductTextSource({
+      productId: options.productId,
+      source: "product_json",
+    }))
+  ) {
+    return "skipped";
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(options.productJson);
@@ -166,6 +186,21 @@ async function processProductItem(options: {
     product.slide_image7 ?? undefined,
     product.slide_image8 ?? undefined,
   ];
+
+  // 既存データの扱い:
+  // - skip: 既に product_json が存在するなら何もしない
+  // - delete_then_insert: 既存の当該 product_id データを消してから再登録
+  const exists = await checkExistingProductTextSource({
+    productId,
+    source: "product_json",
+  });
+  if (exists) {
+    if (options.existingBehavior === "skip") {
+      return "skipped";
+    }
+    await deleteProductTextEntries({ productId });
+    await deleteProductImagesVectorize({ productId });
+  }
 
   await registerTextEntry({
     text,
@@ -229,6 +264,8 @@ async function processProductItem(options: {
     imageUrl: product.image ?? null,
     slideImageUrls,
   });
+
+  return "processed";
 }
 
 function errorResponse(error: unknown) {
@@ -262,14 +299,39 @@ export async function POST(req: Request) {
       return Response.json({ ok: true, job: nextJob, processed: 0 });
     }
 
+    // skip の場合: product_id がある行はまとめて「既存判定」して早めにスキップできる
+    const existingProductJsonIds =
+      job.existingBehavior === "skip"
+        ? await getExistingProductIdsForSource({
+            productIds: items
+              .map((item) => item.product_id)
+              .filter((value): value is string => typeof value === "string" && value.trim().length > 0),
+            source: "product_json",
+          })
+        : new Set<string>();
+
     for (const item of items) {
       try {
-        await processProductItem({
+        if (
+          job.existingBehavior === "skip" &&
+          item.product_id &&
+          existingProductJsonIds.has(item.product_id)
+        ) {
+          await markItemSkipped({ itemId: item.id, jobId });
+          continue;
+        }
+
+        const outcome = await processProductItem({
           productJson: item.product_json,
           productId: item.product_id,
           cityCode: item.city_code,
+          existingBehavior: job.existingBehavior,
         });
-        await markItemSuccess({ itemId: item.id, jobId });
+        if (outcome === "skipped") {
+          await markItemSkipped({ itemId: item.id, jobId });
+        } else {
+          await markItemSuccess({ itemId: item.id, jobId });
+        }
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Unknown error";

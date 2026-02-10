@@ -29,6 +29,7 @@ const navLinks = [
   { href: "/image-search", label: "画像検索(アップロード)" },
   { href: "/text-registration", label: "文字情報登録" },
   { href: "/product-json-import", label: "商品JSON取り込み" },
+  { href: "/product-json-import-v2", label: "商品JSON取り込み(v2)" },
   { href: "/chat-recommend", label: "チャット履歴レコメンド" },
   { href: "/agent-recommend", label: "エージェント質問レコメンド" },
   { href: "/text-info-list", label: "文字情報一覧" },

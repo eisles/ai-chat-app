@@ -1,9 +1,11 @@
 import {
-  createImportJob,
-  getFailedItems,
-  getImportJob,
-  getProcessingItems,
-} from "@/lib/product-json-import";
+  createImportJobV2,
+  CAPTION_IMAGE_INPUT_MODES,
+  getQueueStatsV2,
+  getFailedItemsV2,
+  getImportJobV2,
+  getProcessingItemsV2,
+} from "@/lib/product-json-import-v2";
 import { parseExistingProductBehavior } from "@/lib/product-import-behavior";
 
 export const runtime = "nodejs";
@@ -105,6 +107,23 @@ function getColumn(record: CsvRow, keys: string[]) {
   return "";
 }
 
+function parseBoolean(value: unknown): boolean | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (value === "true" || value === true) return true;
+  if (value === "false" || value === false) return false;
+  return undefined;
+}
+
+function parseCaptionImageInput(value: unknown) {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  if (CAPTION_IMAGE_INPUT_MODES.includes(normalized as never)) {
+    return normalized as (typeof CAPTION_IMAGE_INPUT_MODES)[number];
+  }
+  return undefined;
+}
+
 function errorResponse(error: unknown) {
   if (error instanceof ApiError) {
     return Response.json({ ok: false, error: error.message }, { status: error.status });
@@ -118,7 +137,7 @@ export async function POST(req: Request) {
     const formData = await req.formData();
     const file = formData.get("file");
     if (!(file instanceof File)) {
-      throw new ApiError("CSV file is required", 400);
+      throw new ApiError("CSVファイルが必要です", 400);
     }
     const existingBehavior = (() => {
       try {
@@ -128,10 +147,15 @@ export async function POST(req: Request) {
       }
     })();
 
+    const doTextEmbedding = parseBoolean(formData.get("doTextEmbedding"));
+    const doImageCaptions = parseBoolean(formData.get("doImageCaptions"));
+    const doImageVectors = parseBoolean(formData.get("doImageVectors"));
+    const captionImageInput = parseCaptionImageInput(formData.get("captionImageInput"));
+
     const content = await file.text();
     const rows = mapCsvRows(parseCsv(content));
     if (rows.length === 0) {
-      throw new ApiError("CSV has no rows", 400);
+      throw new ApiError("CSVにデータ行がありません", 400);
     }
 
     let invalidCount = 0;
@@ -161,16 +185,26 @@ export async function POST(req: Request) {
       };
     });
 
-    const jobId = await createImportJob({ items, invalidCount, existingBehavior });
-    const job = await getImportJob(jobId);
-    const failedItems = await getFailedItems(jobId, 5);
-    const processingItems = await getProcessingItems(jobId, 5);
+    const jobId = await createImportJobV2({
+      items,
+      invalidCount,
+      existingBehavior,
+      doTextEmbedding,
+      doImageCaptions,
+      doImageVectors,
+      captionImageInput,
+    });
+    const job = await getImportJobV2(jobId);
+    const failedItems = await getFailedItemsV2(jobId, 5);
+    const processingItems = await getProcessingItemsV2(jobId, 5);
+    const queueStats = await getQueueStatsV2(jobId);
 
     return Response.json({
       ok: true,
       job,
       failedItems,
       processingItems,
+      queueStats,
     });
   } catch (error) {
     return errorResponse(error);
@@ -181,15 +215,16 @@ export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const jobId = searchParams.get("jobId");
   if (!jobId) {
-    return Response.json({ ok: false, error: "jobId is required" }, { status: 400 });
+    return Response.json({ ok: false, error: "jobIdが必要です" }, { status: 400 });
   }
-  const job = await getImportJob(jobId);
+  const job = await getImportJobV2(jobId);
   if (!job) {
-    return Response.json({ ok: false, error: "job not found" }, { status: 404 });
+    return Response.json({ ok: false, error: "jobが見つかりません" }, { status: 404 });
   }
-  const failedItems = await getFailedItems(jobId, 5);
-  const processingItems = await getProcessingItems(jobId, 5);
-  return Response.json({ ok: true, job, failedItems, processingItems });
+  const failedItems = await getFailedItemsV2(jobId, 5);
+  const processingItems = await getProcessingItemsV2(jobId, 5);
+  const queueStats = await getQueueStatsV2(jobId);
+  return Response.json({ ok: true, job, failedItems, processingItems, queueStats });
 }
 
 export function OPTIONS() {

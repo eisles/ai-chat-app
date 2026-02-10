@@ -1,4 +1,5 @@
 import { getDb } from "@/lib/neon";
+import type { ExistingProductBehavior } from "@/lib/product-import-behavior";
 import { randomUUID } from "crypto";
 
 export type ImportJob = {
@@ -8,6 +9,8 @@ export type ImportJob = {
   processedCount: number;
   successCount: number;
   failureCount: number;
+  skippedCount: number;
+  existingBehavior: ExistingProductBehavior;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -31,6 +34,8 @@ export async function ensureProductImportTables() {
       processed_count integer not null,
       success_count integer not null,
       failure_count integer not null,
+      skipped_count integer not null default 0,
+      existing_behavior text not null default 'skip',
       created_at timestamptz default now(),
       updated_at timestamptz default now(),
       completed_at timestamptz
@@ -39,6 +44,23 @@ export async function ensureProductImportTables() {
   await db`
     alter table public.product_import_jobs
     add column if not exists completed_at timestamptz
+  `;
+  await db`
+    alter table public.product_import_jobs
+    add column if not exists existing_behavior text not null default 'skip'
+  `;
+  // 既存環境向け: デフォルト値を "skip" に寄せる
+  await db`
+    alter table public.product_import_jobs
+    alter column existing_behavior set default 'skip'
+  `;
+  await db`
+    alter table public.product_import_jobs
+    add column if not exists skipped_count integer not null default 0
+  `;
+  await db`
+    alter table public.product_import_jobs
+    alter column skipped_count set default 0
   `;
   await db`
     create table if not exists public.product_import_items (
@@ -71,6 +93,7 @@ export async function createImportJob(options: {
     error?: string | null;
   }>;
   invalidCount: number;
+  existingBehavior: ExistingProductBehavior;
 }) {
   const db = await ensureProductImportTables();
   const jobId = randomUUID();
@@ -78,6 +101,7 @@ export async function createImportJob(options: {
   const processedCount = options.invalidCount;
   const failureCount = options.invalidCount;
   const successCount = 0;
+  const skippedCount = 0;
   const status = processedCount >= totalCount ? "completed" : "pending";
 
   await db`
@@ -87,7 +111,9 @@ export async function createImportJob(options: {
       total_count,
       processed_count,
       success_count,
-      failure_count
+      failure_count,
+      skipped_count,
+      existing_behavior
     )
     values (
       ${jobId},
@@ -95,7 +121,9 @@ export async function createImportJob(options: {
       ${totalCount},
       ${processedCount},
       ${successCount},
-      ${failureCount}
+      ${failureCount},
+      ${skippedCount},
+      ${options.existingBehavior}
     )
   `;
 
@@ -138,6 +166,8 @@ export async function getImportJob(jobId: string): Promise<ImportJob | null> {
       processed_count,
       success_count,
       failure_count,
+      skipped_count,
+      existing_behavior,
       created_at,
       updated_at,
       completed_at
@@ -151,6 +181,8 @@ export async function getImportJob(jobId: string): Promise<ImportJob | null> {
     processed_count: number;
     success_count: number;
     failure_count: number;
+    skipped_count: number;
+    existing_behavior: ExistingProductBehavior;
     created_at: Date;
     updated_at: Date;
     completed_at: Date | null;
@@ -165,6 +197,8 @@ export async function getImportJob(jobId: string): Promise<ImportJob | null> {
     processedCount: Number(row.processed_count),
     successCount: Number(row.success_count),
     failureCount: Number(row.failure_count),
+    skippedCount: Number(row.skipped_count ?? 0),
+    existingBehavior: row.existing_behavior ?? "skip",
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
     completedAt: row.completed_at ? row.completed_at.toISOString() : null,
@@ -260,6 +294,25 @@ export async function markItemFailure(options: {
     update public.product_import_jobs
     set processed_count = processed_count + 1,
         failure_count = failure_count + 1,
+        updated_at = now()
+    where id = ${options.jobId}
+  `;
+}
+
+export async function markItemSkipped(options: {
+  itemId: string;
+  jobId: string;
+}) {
+  const db = await ensureProductImportTables();
+  await db`
+    update public.product_import_items
+    set status = 'skipped', error = null, updated_at = now()
+    where id = ${options.itemId}
+  `;
+  await db`
+    update public.product_import_jobs
+    set processed_count = processed_count + 1,
+        skipped_count = skipped_count + 1,
         updated_at = now()
     where id = ${options.jobId}
   `;

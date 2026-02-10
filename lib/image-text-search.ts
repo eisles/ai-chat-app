@@ -148,6 +148,11 @@ async function ensureTextEmbeddingsTable() {
   return dbInitPromise;
 }
 
+// 他モジュールから「存在チェック/削除」をしたいケース用に初期化だけ公開する
+export async function ensureProductTextEmbeddingsInitialized() {
+  await ensureTextEmbeddingsTable();
+}
+
 export function hashText(text: string, source?: string) {
   const payload = source ? `${source}:${text}` : text;
   return createHash("sha256").update(payload).digest("hex");
@@ -427,6 +432,98 @@ export async function deleteTextEntry(id: string): Promise<DeletedText | null> {
   }
 
   return { id: rows[0]!.id };
+}
+
+export async function checkExistingProductTextSource(options: {
+  productId: string;
+  source: string;
+}): Promise<boolean> {
+  const db = await ensureTextEmbeddingsTable();
+  const rows = (await db`
+    select 1 from product_text_embeddings
+    where product_id = ${options.productId}
+      and text_source = ${options.source}
+    limit 1
+  `) as Array<Record<string, unknown>>;
+  return rows.length > 0;
+}
+
+export async function checkExistingProductTextSourcesAny(options: {
+  productId: string;
+  sources: string[];
+}): Promise<boolean> {
+  const db = await ensureTextEmbeddingsTable();
+  const uniqueSources = Array.from(new Set(options.sources)).filter(
+    (s) => typeof s === "string" && s.trim().length > 0
+  );
+  if (uniqueSources.length === 0) return false;
+
+  const rows = (await db`
+    select 1 from product_text_embeddings
+    where product_id = ${options.productId}
+      and text_source = any(${uniqueSources}::text[])
+    limit 1
+  `) as Array<Record<string, unknown>>;
+  return rows.length > 0;
+}
+
+export async function getExistingProductIdsForSource(options: {
+  productIds: string[];
+  source: string;
+}): Promise<Set<string>> {
+  const db = await ensureTextEmbeddingsTable();
+  const uniqueProductIds = Array.from(new Set(options.productIds)).filter(
+    (id) => typeof id === "string" && id.trim().length > 0
+  );
+  if (uniqueProductIds.length === 0) {
+    return new Set();
+  }
+
+  const rows = (await db`
+    select distinct product_id
+    from product_text_embeddings
+    where text_source = ${options.source}
+      and product_id = any(${uniqueProductIds}::text[])
+  `) as Array<{ product_id: string }>;
+
+  return new Set(rows.map((row) => row.product_id));
+}
+
+export async function getExistingProductIdsForSources(options: {
+  productIds: string[];
+  sources: string[];
+}): Promise<Set<string>> {
+  const db = await ensureTextEmbeddingsTable();
+  const uniqueProductIds = Array.from(new Set(options.productIds)).filter(
+    (id) => typeof id === "string" && id.trim().length > 0
+  );
+  const uniqueSources = Array.from(new Set(options.sources)).filter(
+    (s) => typeof s === "string" && s.trim().length > 0
+  );
+  if (uniqueProductIds.length === 0 || uniqueSources.length === 0) {
+    return new Set();
+  }
+
+  const rows = (await db`
+    select distinct product_id
+    from product_text_embeddings
+    where text_source = any(${uniqueSources}::text[])
+      and product_id = any(${uniqueProductIds}::text[])
+  `) as Array<{ product_id: string }>;
+
+  return new Set(rows.map((row) => row.product_id));
+}
+
+export async function deleteProductTextEntries(options: {
+  productId: string;
+}): Promise<number> {
+  const db = await ensureTextEmbeddingsTable();
+  const rows = (await db`
+    delete from product_text_embeddings
+    where product_id = ${options.productId}
+    returning id
+  `) as Array<{ id: string }>;
+  return rows.length;
 }
 
 export function assertOpenAIError(error: unknown): OpenAIError | null {

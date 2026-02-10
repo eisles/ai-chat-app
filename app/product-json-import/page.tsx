@@ -2,7 +2,16 @@
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useEffect, useRef, useState } from "react";
+
+type ExistingBehavior = "skip" | "delete_then_insert";
 
 type Job = {
   id: string;
@@ -11,6 +20,8 @@ type Job = {
   processedCount: number;
   successCount: number;
   failureCount: number;
+  skippedCount: number;
+  existingBehavior: ExistingBehavior;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -66,6 +77,8 @@ type BackfillResponse = {
 
 export default function ProductJsonImportPage() {
   const [file, setFile] = useState<File | null>(null);
+  const [existingBehavior, setExistingBehavior] =
+    useState<ExistingBehavior>("skip");
   const [job, setJob] = useState<Job | null>(null);
   const [failedItems, setFailedItems] = useState<FailedItem[]>([]);
   const [processingItems, setProcessingItems] = useState<ProcessingItem[]>([]);
@@ -168,6 +181,7 @@ export default function ProductJsonImportPage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
+      formData.append("existingBehavior", existingBehavior);
       const res = await fetch("/api/product-json-import", {
         method: "POST",
         body: formData,
@@ -307,6 +321,25 @@ export default function ProductJsonImportPage() {
             accept=".csv,text/csv"
             onChange={(event) => setFile(event.target.files?.[0] ?? null)}
           />
+          <div className="flex flex-col gap-2 text-sm">
+            <div className="font-medium">既存データの扱い</div>
+            <Select
+              value={existingBehavior}
+              onValueChange={(value) => setExistingBehavior(value as ExistingBehavior)}
+            >
+              <SelectTrigger className="w-full sm:w-[320px]">
+                <SelectValue placeholder="選択してください" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="skip">
+                  何もしない（既存があればスキップ）
+                </SelectItem>
+                <SelectItem value="delete_then_insert">
+                  削除して登録（既存を削除してから再登録）
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
           <Button type="submit" disabled={isUploading}>
             {isUploading ? "アップロード中..." : "ジョブ作成"}
           </Button>
@@ -319,10 +352,12 @@ export default function ProductJsonImportPage() {
           <div className="mt-3 space-y-2 text-sm">
             <div>jobId: {job.id}</div>
             <div>status: {job.status}</div>
+            <div>既存データの扱い: {job.existingBehavior}</div>
             <div>progress: {statusLabel}</div>
             <div>progress(%): {progressPercent}</div>
             <div>success: {job.successCount}</div>
             <div>failure: {job.failureCount}</div>
+            <div>skipped: {job.skippedCount}</div>
             <div>startedAt: {formatJst(job.createdAt)}</div>
             <div>completedAt: {formatJst(job.completedAt)}</div>
             <div>elapsed: {formatElapsed(job.createdAt, job.completedAt)}</div>

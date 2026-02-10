@@ -129,16 +129,12 @@ async function ensureProductImagesVectorizeTable() {
     alter table public.product_images_vectorize
     add column if not exists slide_index integer not null default 0
   `;
-  await db`
-    alter table public.product_images_vectorize
-    drop constraint if exists product_images_vectorize_pkey
-  `;
-  await db`
-    alter table public.product_images_vectorize
-    add primary key (id)
-  `;
 
   return db;
+}
+
+export async function ensureProductImagesVectorizeInitialized() {
+  await ensureProductImagesVectorizeTable();
 }
 
 function vectorLiteral(vector?: number[] | null) {
@@ -146,6 +142,18 @@ function vectorLiteral(vector?: number[] | null) {
     return null;
   }
   return `[${vector.join(",")}]`;
+}
+
+export async function deleteProductImagesVectorize(options: {
+  productId: string;
+}): Promise<number> {
+  const db = await ensureProductImagesVectorizeTable();
+  const rows = (await db`
+    delete from public.product_images_vectorize
+    where product_id = ${options.productId}
+    returning id
+  `) as Array<{ id: string }>;
+  return rows.length;
 }
 
 export async function upsertProductImagesVectorize(options: {
@@ -265,4 +273,36 @@ export async function vectorizeProductImages(options: {
     });
   }
 
+}
+
+export async function checkExistingProductImagesVectorize(options: {
+  productId: string;
+}): Promise<boolean> {
+  const db = await ensureProductImagesVectorizeTable();
+  const rows = (await db`
+    select 1 from public.product_images_vectorize
+    where product_id = ${options.productId}
+    limit 1
+  `) as Array<Record<string, unknown>>;
+  return rows.length > 0;
+}
+
+export async function getExistingVectorizedProductIds(options: {
+  productIds: string[];
+}): Promise<Set<string>> {
+  const db = await ensureProductImagesVectorizeTable();
+  const uniqueProductIds = Array.from(new Set(options.productIds)).filter(
+    (id) => typeof id === "string" && id.trim().length > 0
+  );
+  if (uniqueProductIds.length === 0) {
+    return new Set();
+  }
+
+  const rows = (await db`
+    select distinct product_id
+    from public.product_images_vectorize
+    where product_id = any(${uniqueProductIds}::text[])
+  `) as Array<{ product_id: string }>;
+
+  return new Set(rows.map((row) => row.product_id));
 }
