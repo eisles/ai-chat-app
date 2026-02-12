@@ -122,7 +122,7 @@ type UploadResumeState = {
 };
 
 function normalizeHeader(header: string) {
-  return header.trim().toLowerCase();
+  return header.trim().toLowerCase().replace(/^\ufeff/, "");
 }
 
 function getColumn(record: CsvRow, keys: string[]) {
@@ -193,6 +193,9 @@ export default function ProductJsonImportV2Page() {
     totalBytes: number;
     uploadedItems: number;
   } | null>(null);
+  const [uploadErrors, setUploadErrors] = useState<
+    Array<{ rowIndex: number; reason: string; preview: string }>
+  >([]);
   const [resumeState, setResumeState] = useState<UploadResumeState | null>(null);
   const isTicking = useRef(false);
   const [consecutiveRunErrors, setConsecutiveRunErrors] = useState(0);
@@ -338,6 +341,7 @@ export default function ProductJsonImportV2Page() {
       return;
     }
     setError(null);
+    setUploadErrors([]);
     setIsUploading(true);
 
     try {
@@ -475,17 +479,30 @@ export default function ProductJsonImportV2Page() {
           return;
         }
         const cityCode =
-          cityCodeIndex >= 0 ? (row[cityCodeIndex] ?? "").trim() : "";
+          cityCodeIndex >= 0
+            ? (row[cityCodeIndex] ?? "").trim()
+            : (row[0] ?? "").trim();
         const productId =
-          productIdIndex >= 0 ? (row[productIdIndex] ?? "").trim() : "";
+          productIdIndex >= 0
+            ? (row[productIdIndex] ?? "").trim()
+            : (row[1] ?? "").trim();
         let productJson =
           productJsonIndex >= 0 ? (row[productJsonIndex] ?? "").trim() : "";
 
         // Google Sheets等でクォートが崩れて列が分割された場合の救済
-        if (!productJson && productJsonIndex >= 0 && row.length > productJsonIndex) {
-          const tail = row.slice(productJsonIndex).join(",").trim();
-          if (tail) {
-            productJson = tail;
+        if (!productJson) {
+          const fallbackIndex =
+            productJsonIndex >= 0
+              ? productJsonIndex
+              : row.findIndex((value) => {
+                  const trimmed = value.trim();
+                  return trimmed.startsWith("{") || trimmed.startsWith("\"{");
+                });
+          if (fallbackIndex >= 0 && row.length > fallbackIndex) {
+            const tail = row.slice(fallbackIndex).join(",").trim();
+            if (tail) {
+              productJson = tail;
+            }
           }
         }
 
@@ -505,6 +522,17 @@ export default function ProductJsonImportV2Page() {
               status: "failed",
               error: "product_json is required",
             };
+
+        if (!productJson) {
+          const preview = row
+            .slice(0, Math.min(row.length, 6))
+            .map((value) => value.replace(/\s+/g, " ").slice(0, 80))
+            .join(" | ");
+          setUploadErrors((prev) => {
+            const next = [...prev, { rowIndex, reason: "product_json is required", preview }];
+            return next.length > 5 ? next.slice(-5) : next;
+          });
+        }
 
         const itemBytes = estimateItemBytes(item);
         if (
@@ -784,6 +812,16 @@ export default function ProductJsonImportV2Page() {
                 )
               )}
               %） / 送信済み: {uploadProgress.uploadedItems}件
+            </div>
+          )}
+          {uploadErrors.length > 0 && (
+            <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              <div className="font-medium text-foreground">直近の取込エラー（最大5件）</div>
+              {uploadErrors.map((entry) => (
+                <div key={`${entry.rowIndex}`}>
+                  row {entry.rowIndex} / {entry.reason} / preview: {entry.preview}
+                </div>
+              ))}
             </div>
           )}
         </form>
