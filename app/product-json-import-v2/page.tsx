@@ -180,8 +180,8 @@ export default function ProductJsonImportV2Page() {
   const [existingBehavior, setExistingBehavior] =
     useState<ExistingBehavior>("skip");
   const [doTextEmbedding, setDoTextEmbedding] = useState(true);
-  const [doImageCaptions, setDoImageCaptions] = useState(true);
-  const [doImageVectors, setDoImageVectors] = useState(true);
+  const [doImageCaptions, setDoImageCaptions] = useState(false);
+  const [doImageVectors, setDoImageVectors] = useState(false);
   const [captionImageInput, setCaptionImageInput] =
     useState<CaptionImageInputMode>("url");
   const [limit, setLimit] = useState("5");
@@ -835,7 +835,7 @@ export default function ProductJsonImportV2Page() {
                 checked={doTextEmbedding}
                 onChange={(e) => setDoTextEmbedding(e.target.checked)}
               />
-              <span>テキスト埋め込み</span>
+              <span>テキスト埋め込み（目安: 1件あたり1〜5秒）</span>
             </label>
             <div className="text-xs text-muted-foreground pl-6">
               商品名/説明をEmbedding化して検索に使います。
@@ -846,7 +846,7 @@ export default function ProductJsonImportV2Page() {
                 checked={doImageCaptions}
                 onChange={(e) => setDoImageCaptions(e.target.checked)}
               />
-              <span>画像キャプション</span>
+              <span>画像キャプション（目安: 1枚あたり2〜8秒）</span>
             </label>
             <div className="flex flex-col gap-2 pl-6">
               <div className="text-xs text-muted-foreground">
@@ -879,7 +879,7 @@ export default function ProductJsonImportV2Page() {
                 checked={doImageVectors}
                 onChange={(e) => setDoImageVectors(e.target.checked)}
               />
-              <span>画像ベクトル</span>
+              <span>画像ベクトル（目安: 1枚あたり1〜4秒）</span>
             </label>
             <div className="text-xs text-muted-foreground pl-6">
               画像検索用のベクトルを作成します（重い処理）。
