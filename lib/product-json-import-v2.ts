@@ -1,8 +1,11 @@
+import { ensureProductTextEmbeddingsInitialized } from "@/lib/image-text-search";
 import { getDb } from "@/lib/neon";
+import { ensureProductImagesVectorizeInitialized } from "@/lib/vectorize-product-images";
 import type { ExistingProductBehavior } from "@/lib/product-import-behavior";
 import { randomUUID } from "crypto";
 
 export const INSERT_IMPORT_ITEMS_BATCH_SIZE = 1000;
+export const DOWNSTREAM_DELETE_BATCH_SIZE = 500;
 
 export const CAPTION_IMAGE_INPUT_MODES = ["url", "data_url"] as const;
 export type CaptionImageInputMode = (typeof CAPTION_IMAGE_INPUT_MODES)[number];
@@ -477,6 +480,44 @@ export async function deleteImportJobV2(jobId: string): Promise<boolean> {
     returning id
   `) as Array<{ id: string }>;
   return rows.length > 0;
+}
+
+export async function deleteDownstreamForJobV2(options: { jobId: string }) {
+  const db = await ensureProductImportTablesV2();
+  const rows = (await db`
+    select distinct product_id
+    from public.product_import_items_v2
+    where job_id = ${options.jobId}
+      and product_id is not null
+  `) as Array<{ product_id: string }>;
+  const productIds = rows.map((row) => row.product_id).filter((id) => id);
+  if (productIds.length === 0) {
+    return { productIds: 0, deletedText: 0, deletedImages: 0 };
+  }
+
+  await ensureProductTextEmbeddingsInitialized();
+  await ensureProductImagesVectorizeInitialized();
+
+  let deletedText = 0;
+  let deletedImages = 0;
+  for (let offset = 0; offset < productIds.length; offset += DOWNSTREAM_DELETE_BATCH_SIZE) {
+    const batch = productIds.slice(offset, offset + DOWNSTREAM_DELETE_BATCH_SIZE);
+    const textRows = (await db`
+      delete from product_text_embeddings
+      where product_id = any(${batch}::text[])
+      returning id
+    `) as Array<{ id: string }>;
+    deletedText += textRows.length;
+
+    const imageRows = (await db`
+      delete from public.product_images_vectorize
+      where product_id = any(${batch}::text[])
+      returning id
+    `) as Array<{ id: string }>;
+    deletedImages += imageRows.length;
+  }
+
+  return { productIds: productIds.length, deletedText, deletedImages };
 }
 
 export async function requeueImportItemsV2(options: {

@@ -1,4 +1,5 @@
 import {
+  deleteDownstreamForJobV2,
   deleteImportJobV2,
   requeueImportItemsV2,
 } from "@/lib/product-json-import-v2";
@@ -30,7 +31,7 @@ function parseStatuses(value: unknown) {
 }
 
 export async function DELETE(
-  _req: Request,
+  req: Request,
   { params }: { params: { jobId?: string } }
 ) {
   try {
@@ -38,11 +39,18 @@ export async function DELETE(
     if (!jobId) {
       throw new ApiError("jobIdが必要です", 400);
     }
+    const url = new URL(req.url);
+    const deleteDownstream = url.searchParams.get("deleteDownstream") === "true";
+    let downstreamResult: { productIds: number; deletedText: number; deletedImages: number } | null =
+      null;
+    if (deleteDownstream) {
+      downstreamResult = await deleteDownstreamForJobV2({ jobId });
+    }
     const deleted = await deleteImportJobV2(jobId);
     if (!deleted) {
       throw new ApiError("jobが見つかりません", 404);
     }
-    return Response.json({ ok: true });
+    return Response.json({ ok: true, downstreamResult });
   } catch (error) {
     return errorResponse(error);
   }

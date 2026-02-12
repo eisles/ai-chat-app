@@ -10,6 +10,12 @@ const mockState = vi.hoisted(() => {
       return `${acc}${part}${placeholder}`;
     }, "");
     calls.push({ sql, values });
+    if (
+      sql.includes("select distinct product_id") &&
+      sql.includes("from public.product_import_items_v2")
+    ) {
+      return [{ product_id: "1001" }, { product_id: "1002" }];
+    }
     // 簡易モック: `returning id` を使う更新だけ、戻り値が必要なケースがある
     if (
       sql.includes("update public.product_import_items_v2") &&
@@ -32,6 +38,7 @@ vi.mock("@/lib/neon", () => {
 import {
   appendImportItemsV2,
   createImportJobV2,
+  deleteDownstreamForJobV2,
   getQueueStatsV2,
   INSERT_IMPORT_ITEMS_BATCH_SIZE,
   markItemsSkippedBulkV2,
@@ -199,5 +206,21 @@ describe("product-json-import-v2", () => {
         x.sql.includes("product_id = any(")
     );
     expect(call).toBeTruthy();
+  });
+
+  it("deletes downstream for job product ids in batches", async () => {
+    await deleteDownstreamForJobV2({
+      jobId: "00000000-0000-0000-0000-000000000000",
+    });
+
+    const textDelete = mockState.calls.find(
+      (x) => x.sql.includes("delete from product_text_embeddings")
+    );
+    expect(textDelete).toBeTruthy();
+
+    const imageDelete = mockState.calls.find(
+      (x) => x.sql.includes("delete from public.product_images_vectorize")
+    );
+    expect(imageDelete).toBeTruthy();
   });
 });

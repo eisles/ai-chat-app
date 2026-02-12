@@ -215,6 +215,9 @@ export default function ProductJsonImportV2Page() {
   const [jobActions, setJobActions] = useState<
     Record<string, { failed: boolean; skipped: boolean; success: boolean }>
   >({});
+  const [jobDeleteDownstream, setJobDeleteDownstream] = useState<
+    Record<string, boolean>
+  >({});
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -274,6 +277,15 @@ export default function ProductJsonImportV2Page() {
       for (const jobItem of nextJobs) {
         if (!next[jobItem.id]) {
           next[jobItem.id] = { failed: true, skipped: false, success: false };
+        }
+      }
+      return next;
+    });
+    setJobDeleteDownstream((prev) => {
+      const next = { ...prev };
+      for (const jobItem of nextJobs) {
+        if (next[jobItem.id] === undefined) {
+          next[jobItem.id] = false;
         }
       }
       return next;
@@ -661,13 +673,17 @@ export default function ProductJsonImportV2Page() {
   }
 
   async function handleDeleteJob(target: Job) {
+    const deleteDownstream = jobDeleteDownstream[target.id] ?? false;
     const confirm = window.confirm(
-      `ジョブを削除しますか？\\njobId: ${target.id}\\n件数: ${target.totalCount}（success: ${target.successCount}, failed: ${target.failureCount}, skipped: ${target.skippedCount}）\\n※ items（CSVデータ）は削除されますが、downstream（埋め込み/画像ベクトル）は削除されません。`
+      `ジョブを削除しますか？\\njobId: ${target.id}\\n件数: ${target.totalCount}（success: ${target.successCount}, failed: ${target.failureCount}, skipped: ${target.skippedCount}）\\n※ items（CSVデータ）は削除されます。\\n※ downstream（埋め込み/画像ベクトル）削除: ${deleteDownstream ? "あり" : "なし"}`
     );
     if (!confirm) return;
-    const res = await fetch(`/api/product-json-import-v2/jobs/${target.id}`, {
-      method: "DELETE",
-    });
+    const res = await fetch(
+      `/api/product-json-import-v2/jobs/${target.id}?deleteDownstream=${deleteDownstream ? "true" : "false"}`,
+      {
+        method: "DELETE",
+      }
+    );
     const data = await readJsonResponse<{ ok: boolean; error?: string }>(res);
     if (!data.ok) {
       throw new Error(data.error ?? "ジョブ削除に失敗しました");
@@ -972,11 +988,11 @@ export default function ProductJsonImportV2Page() {
             </Button>
             <Button type="button" variant="secondary" onClick={() => fetchStatus(job.id)}>
               最新化
-            </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={async () => {
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={async () => {
                 const next = await runBatch();
                 await fetchStatus(job.id);
                 if (next?.status === "completed") setIsRunning(false);
@@ -1219,6 +1235,19 @@ export default function ProductJsonImportV2Page() {
                     >
                       再処理
                     </Button>
+                    <label className="flex items-center gap-1 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={jobDeleteDownstream[jobItem.id] ?? false}
+                        onChange={(event) =>
+                          setJobDeleteDownstream((prev) => ({
+                            ...prev,
+                            [jobItem.id]: event.target.checked,
+                          }))
+                        }
+                      />
+                      <span>downstreamも削除</span>
+                    </label>
                     <Button
                       type="button"
                       variant="destructive"
