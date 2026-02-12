@@ -595,6 +595,7 @@ export async function POST(req: Request) {
     });
 
     let processed = 0;
+    let processedThisRun = 0;
     let retried = 0;
     let released = 0;
     const itemReports: ItemReport[] = [];
@@ -701,7 +702,8 @@ export async function POST(req: Request) {
         // 重い処理（画像系）を開始するとタイムアウトしやすいので、残り時間が少ない場合は次回に回す
         if (
           remainingMs < HEAVY_WORK_MIN_REMAINING_MS &&
-          (job.doImageCaptions || job.doImageVectors)
+          (job.doImageCaptions || job.doImageVectors) &&
+          processedThisRun > 0
         ) {
           const remainingIds = remainingItems.slice(i).map((x) => x.id);
           await releaseClaimedItemsV2({ jobId, itemIds: remainingIds });
@@ -774,6 +776,7 @@ export async function POST(req: Request) {
             }
           }
           processed += 1;
+          processedThisRun += 1;
         } catch (error) {
           const message = normalizeErrorMessage(
             error instanceof Error ? error.message : "Unknown error"
@@ -814,6 +817,7 @@ export async function POST(req: Request) {
             errorCode,
           });
           processed += 1;
+          processedThisRun += 1;
           if (debugTimings) {
             itemReports.push({
               itemId: item.id,
