@@ -202,15 +202,8 @@ export async function insertImportItemsBatchV2(
   `;
 }
 
-export async function createImportJobV2(options: {
-  items: Array<{
-    rowIndex: number;
-    cityCode: string | null;
-    productId: string | null;
-    productJson: string;
-    status: "pending" | "failed";
-    error?: string | null;
-  }>;
+export async function createImportJobBaseV2(options: {
+  totalCount: number;
   invalidCount: number;
   existingBehavior: ExistingProductBehavior;
   doTextEmbedding?: boolean;
@@ -220,9 +213,10 @@ export async function createImportJobV2(options: {
 }) {
   const db = await ensureProductImportTablesV2();
   const jobId = randomUUID();
-  const totalCount = options.items.length;
-  const processedCount = options.invalidCount;
-  const failureCount = options.invalidCount;
+  const totalCount = Math.max(0, Math.floor(options.totalCount));
+  const invalidCount = Math.max(0, Math.floor(options.invalidCount));
+  const processedCount = Math.min(totalCount, invalidCount);
+  const failureCount = processedCount;
   const successCount = 0;
   const skippedCount = 0;
   const status = processedCount >= totalCount ? "completed" : "pending";
@@ -258,12 +252,56 @@ export async function createImportJobV2(options: {
     )
   `;
 
+  return jobId;
+}
+
+export async function appendImportItemsV2(options: {
+  jobId: string;
+  items: Array<{
+    rowIndex: number;
+    cityCode: string | null;
+    productId: string | null;
+    productJson: string;
+    status: "pending" | "failed";
+    error?: string | null;
+  }>;
+}) {
+  const db = await ensureProductImportTablesV2();
+
   for (let offset = 0; offset < options.items.length; offset += INSERT_IMPORT_ITEMS_BATCH_SIZE) {
     const batch = options.items.slice(offset, offset + INSERT_IMPORT_ITEMS_BATCH_SIZE);
     const batchWithIds = batch.map((item) => ({ id: randomUUID(), ...item }));
-    await insertImportItemsBatchV2(db, jobId, batchWithIds);
+    await insertImportItemsBatchV2(db, options.jobId, batchWithIds);
   }
+}
 
+export async function createImportJobV2(options: {
+  items: Array<{
+    rowIndex: number;
+    cityCode: string | null;
+    productId: string | null;
+    productJson: string;
+    status: "pending" | "failed";
+    error?: string | null;
+  }>;
+  invalidCount: number;
+  existingBehavior: ExistingProductBehavior;
+  doTextEmbedding?: boolean;
+  doImageCaptions?: boolean;
+  doImageVectors?: boolean;
+  captionImageInput?: CaptionImageInputMode;
+}) {
+  const jobId = await createImportJobBaseV2({
+    totalCount: options.items.length,
+    invalidCount: options.invalidCount,
+    existingBehavior: options.existingBehavior,
+    doTextEmbedding: options.doTextEmbedding,
+    doImageCaptions: options.doImageCaptions,
+    doImageVectors: options.doImageVectors,
+    captionImageInput: options.captionImageInput,
+  });
+
+  await appendImportItemsV2({ jobId, items: options.items });
   return jobId;
 }
 

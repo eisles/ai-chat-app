@@ -1,4 +1,6 @@
 import {
+  appendImportItemsV2,
+  createImportJobBaseV2,
   createImportJobV2,
   CAPTION_IMAGE_INPUT_MODES,
   getQueueStatsV2,
@@ -6,7 +8,10 @@ import {
   getImportJobV2,
   getProcessingItemsV2,
 } from "@/lib/product-json-import-v2";
-import { parseExistingProductBehavior } from "@/lib/product-import-behavior";
+import {
+  parseExistingProductBehavior,
+  type ExistingProductBehavior,
+} from "@/lib/product-import-behavior";
 
 export const runtime = "nodejs";
 
@@ -20,6 +25,34 @@ class ApiError extends Error {
 }
 
 type CsvRow = Record<string, string>;
+
+type JsonItem = {
+  rowIndex: number;
+  cityCode: string | null;
+  productId: string | null;
+  productJson: string;
+  status: "pending" | "failed";
+  error?: string | null;
+};
+
+type CreateJobPayload = {
+  action: "create_job";
+  totalCount: number;
+  invalidCount: number;
+  existingBehavior: ExistingProductBehavior;
+  doTextEmbedding?: boolean;
+  doImageCaptions?: boolean;
+  doImageVectors?: boolean;
+  captionImageInput?: string | null;
+};
+
+type AppendItemsPayload = {
+  action: "append_items";
+  jobId: string;
+  items: JsonItem[];
+};
+
+const MAX_APPEND_ITEMS = 2000;
 
 function parseCsv(content: string) {
   const rows: string[][] = [];
@@ -124,6 +157,53 @@ function parseCaptionImageInput(value: unknown) {
   return undefined;
 }
 
+function parseExistingBehavior(value: unknown): ExistingProductBehavior {
+  try {
+    return parseExistingProductBehavior(value);
+  } catch {
+    throw new ApiError("既存データの扱いが不正です", 400);
+  }
+}
+
+function parseRequiredNumber(value: unknown, label: string) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new ApiError(`${label}が不正です`, 400);
+  }
+  return Math.max(0, Math.floor(parsed));
+}
+
+function parseJsonItem(value: unknown): JsonItem {
+  if (!value || typeof value !== "object") {
+    throw new ApiError("itemsが不正です", 400);
+  }
+  const item = value as {
+    rowIndex?: unknown;
+    cityCode?: unknown;
+    productId?: unknown;
+    productJson?: unknown;
+    status?: unknown;
+    error?: unknown;
+  };
+  const rowIndex = typeof item.rowIndex === "number" ? item.rowIndex : Number(item.rowIndex);
+  if (!Number.isFinite(rowIndex) || rowIndex <= 0) {
+    throw new ApiError("rowIndexが不正です", 400);
+  }
+  const status = item.status === "failed" ? "failed" : "pending";
+  return {
+    rowIndex: Math.floor(rowIndex),
+    cityCode: typeof item.cityCode === "string" && item.cityCode.trim()
+      ? item.cityCode
+      : null,
+    productId: typeof item.productId === "string" && item.productId.trim()
+      ? item.productId
+      : null,
+    productJson: typeof item.productJson === "string" ? item.productJson : "",
+    status,
+    error: typeof item.error === "string" && item.error.trim() ? item.error : null,
+  };
+}
+
 function errorResponse(error: unknown) {
   if (error instanceof ApiError) {
     return Response.json({ ok: false, error: error.message }, { status: error.status });
@@ -134,18 +214,53 @@ function errorResponse(error: unknown) {
 
 export async function POST(req: Request) {
   try {
+    const contentType = req.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const payload = (await req.json()) as Partial<CreateJobPayload & AppendItemsPayload>;
+      if (payload.action === "create_job") {
+        const totalCount = parseRequiredNumber(payload.totalCount, "totalCount");
+        const invalidCount = parseRequiredNumber(payload.invalidCount, "invalidCount");
+        if (invalidCount > totalCount) {
+          throw new ApiError("invalidCountがtotalCountを超えています", 400);
+        }
+        const jobId = await createImportJobBaseV2({
+          totalCount,
+          invalidCount,
+          existingBehavior: parseExistingBehavior(payload.existingBehavior),
+          doTextEmbedding: parseBoolean(payload.doTextEmbedding),
+          doImageCaptions: parseBoolean(payload.doImageCaptions),
+          doImageVectors: parseBoolean(payload.doImageVectors),
+          captionImageInput: parseCaptionImageInput(payload.captionImageInput),
+        });
+        return Response.json({ ok: true, jobId });
+      }
+      if (payload.action === "append_items") {
+        const jobId = typeof payload.jobId === "string" ? payload.jobId : "";
+        if (!jobId) {
+          throw new ApiError("jobIdが必要です", 400);
+        }
+        if (!Array.isArray(payload.items)) {
+          throw new ApiError("itemsが必要です", 400);
+        }
+        if (payload.items.length === 0) {
+          return Response.json({ ok: true, inserted: 0 });
+        }
+        if (payload.items.length > MAX_APPEND_ITEMS) {
+          throw new ApiError(`itemsは最大${MAX_APPEND_ITEMS}件までです`, 400);
+        }
+        const items = payload.items.map((item) => parseJsonItem(item));
+        await appendImportItemsV2({ jobId, items });
+        return Response.json({ ok: true, inserted: items.length });
+      }
+      throw new ApiError("actionが不正です", 400);
+    }
+
     const formData = await req.formData();
     const file = formData.get("file");
     if (!(file instanceof File)) {
       throw new ApiError("CSVファイルが必要です", 400);
     }
-    const existingBehavior = (() => {
-      try {
-        return parseExistingProductBehavior(formData.get("existingBehavior"));
-      } catch {
-        throw new ApiError("既存データの扱いが不正です", 400);
-      }
-    })();
+    const existingBehavior = parseExistingBehavior(formData.get("existingBehavior"));
 
     const doTextEmbedding = parseBoolean(formData.get("doTextEmbedding"));
     const doImageCaptions = parseBoolean(formData.get("doImageCaptions"));

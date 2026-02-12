@@ -46,6 +46,15 @@ type ProcessingItem = {
   updated_at: string;
 };
 
+type UploadItem = {
+  rowIndex: number;
+  cityCode: string | null;
+  productId: string | null;
+  productJson: string;
+  status: "pending" | "failed";
+  error?: string | null;
+};
+
 type JobResponse = {
   ok: boolean;
   job?: Job | null;
@@ -85,6 +94,117 @@ type RunResponse = {
   error?: string;
 };
 
+type CreateJobResponse = {
+  ok: boolean;
+  jobId?: string;
+  error?: string;
+};
+
+type AppendItemsResponse = {
+  ok: boolean;
+  inserted?: number;
+  error?: string;
+};
+
+const UPLOAD_BATCH_SIZE = 200;
+
+type CsvRow = Record<string, string>;
+
+function parseCsv(content: string) {
+  const rows: string[][] = [];
+  let current: string[] = [];
+  let cell = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < content.length; i += 1) {
+    const char = content[i];
+    const next = content[i + 1];
+
+    if (inQuotes) {
+      if (char === "\"") {
+        if (next === "\"") {
+          cell += "\"";
+          i += 1;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cell += char;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inQuotes = true;
+      continue;
+    }
+    if (char === ",") {
+      current.push(cell);
+      cell = "";
+      continue;
+    }
+    if (char === "\n") {
+      current.push(cell);
+      rows.push(current);
+      current = [];
+      cell = "";
+      continue;
+    }
+    if (char === "\r") {
+      continue;
+    }
+    cell += char;
+  }
+
+  if (cell.length > 0 || current.length > 0) {
+    current.push(cell);
+    rows.push(current);
+  }
+
+  return rows;
+}
+
+function normalizeHeader(header: string) {
+  return header.trim().toLowerCase();
+}
+
+function mapCsvRows(rows: string[][]): CsvRow[] {
+  if (rows.length === 0) {
+    return [];
+  }
+  const [headerRow, ...dataRows] = rows;
+  const headers = headerRow.map((value) => normalizeHeader(value));
+
+  return dataRows
+    .map((row) => {
+      const record: CsvRow = {};
+      headers.forEach((header, index) => {
+        record[header] = (row[index] ?? "").trim();
+      });
+      return record;
+    })
+    .filter((record) => Object.values(record).some((value) => value.length > 0));
+}
+
+function getColumn(record: CsvRow, keys: string[]) {
+  for (const key of keys) {
+    const value = record[key];
+    if (value !== undefined && value !== "") {
+      return value;
+    }
+  }
+  return "";
+}
+
+async function readJsonResponse<T>(res: Response): Promise<T> {
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    return (await res.json()) as T;
+  }
+  const text = await res.text();
+  throw new Error(text || `HTTP ${res.status}`);
+}
+
 export default function ProductJsonImportV2Page() {
   const [file, setFile] = useState<File | null>(null);
   const [existingBehavior, setExistingBehavior] =
@@ -114,7 +234,7 @@ export default function ProductJsonImportV2Page() {
 
   async function fetchStatus(jobId: string) {
     const res = await fetch(`/api/product-json-import-v2?jobId=${jobId}`);
-    const data = (await res.json()) as JobResponse;
+    const data = await readJsonResponse<JobResponse>(res);
     if (!data.ok) {
       throw new Error(data.error ?? "ステータス取得に失敗しました");
     }
@@ -139,7 +259,7 @@ export default function ProductJsonImportV2Page() {
         vectorizeConcurrency: parseInt(vectorizeConcurrency, 10) || 2,
       }),
     });
-    const data = (await res.json()) as RunResponse;
+    const data = await readJsonResponse<RunResponse>(res);
     if (!data.ok) {
       throw new Error(data.error ?? "バッチ処理に失敗しました");
     }
@@ -224,25 +344,76 @@ export default function ProductJsonImportV2Page() {
     setIsUploading(true);
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("existingBehavior", existingBehavior);
-      formData.append("doTextEmbedding", String(doTextEmbedding));
-      formData.append("doImageCaptions", String(doImageCaptions));
-      formData.append("doImageVectors", String(doImageVectors));
-      formData.append("captionImageInput", captionImageInput);
-      const res = await fetch("/api/product-json-import-v2", {
-        method: "POST",
-        body: formData,
-      });
-      const data = (await res.json()) as JobResponse;
-      if (!data.ok || !data.job) {
-        throw new Error(data.error ?? "取り込みジョブ作成に失敗しました");
+      const content = await file.text();
+      const rows = mapCsvRows(parseCsv(content));
+      if (rows.length === 0) {
+        throw new Error("CSVにデータ行がありません");
       }
-      setJob(data.job);
-      setFailedItems(data.failedItems ?? []);
-      setProcessingItems(data.processingItems ?? []);
-      setQueueStats(data.queueStats ?? null);
+
+      let invalidCount = 0;
+      const items: UploadItem[] = rows.map((record, index) => {
+        const cityCode = getColumn(record, ["city_code", "city_cd", "citycode"]);
+        const productId = getColumn(record, ["product_id", "productid", "id"]);
+        const productJson = getColumn(record, ["product_json", "json", "product"]);
+
+        if (!productJson) {
+          invalidCount += 1;
+          return {
+            rowIndex: index + 2,
+            cityCode: cityCode || null,
+            productId: productId || null,
+            productJson: "",
+            status: "failed",
+            error: "product_json is required",
+          };
+        }
+
+        return {
+          rowIndex: index + 2,
+          cityCode: cityCode || null,
+          productId: productId || null,
+          productJson,
+          status: "pending",
+        };
+      });
+
+      const createRes = await fetch("/api/product-json-import-v2", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "create_job",
+          totalCount: items.length,
+          invalidCount,
+          existingBehavior,
+          doTextEmbedding,
+          doImageCaptions,
+          doImageVectors,
+          captionImageInput,
+        }),
+      });
+      const createData = await readJsonResponse<CreateJobResponse>(createRes);
+      if (!createData.ok || !createData.jobId) {
+        throw new Error(createData.error ?? "取り込みジョブ作成に失敗しました");
+      }
+
+      for (let offset = 0; offset < items.length; offset += UPLOAD_BATCH_SIZE) {
+        const batch = items.slice(offset, offset + UPLOAD_BATCH_SIZE);
+        const appendRes = await fetch("/api/product-json-import-v2", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "append_items",
+            jobId: createData.jobId,
+            items: batch,
+          }),
+        });
+        const appendData = await readJsonResponse<AppendItemsResponse>(appendRes);
+        if (!appendData.ok) {
+          throw new Error(appendData.error ?? "取り込み明細の追加に失敗しました");
+        }
+      }
+
+      await fetchStatus(createData.jobId);
     } catch (uploadError) {
       setError(
         uploadError instanceof Error ? uploadError.message : "取り込みに失敗しました"
