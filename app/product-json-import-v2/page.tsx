@@ -401,6 +401,9 @@ export default function ProductJsonImportV2Page() {
       const decoder = new TextDecoder("utf-8");
       let headerRow: string[] | null = null;
       let headers: string[] = [];
+      let cityCodeIndex = -1;
+      let productIdIndex = -1;
+      let productJsonIndex = -1;
       let currentRow: string[] = [];
       let cell = "";
       let inQuotes = false;
@@ -448,6 +451,15 @@ export default function ProductJsonImportV2Page() {
         if (!headerRow) {
           headerRow = row;
           headers = headerRow.map((value) => normalizeHeader(value));
+          cityCodeIndex = headers.findIndex((header) =>
+            ["city_code", "city_cd", "citycode"].includes(header)
+          );
+          productIdIndex = headers.findIndex((header) =>
+            ["product_id", "productid", "id"].includes(header)
+          );
+          productJsonIndex = headers.findIndex((header) =>
+            ["product_json", "json", "product"].includes(header)
+          );
           return;
         }
         const rowIndex = dataRowIndex + 2;
@@ -462,9 +474,20 @@ export default function ProductJsonImportV2Page() {
         if (!Object.values(record).some((value) => value.length > 0)) {
           return;
         }
-        const cityCode = getColumn(record, ["city_code", "city_cd", "citycode"]);
-        const productId = getColumn(record, ["product_id", "productid", "id"]);
-        const productJson = getColumn(record, ["product_json", "json", "product"]);
+        const cityCode =
+          cityCodeIndex >= 0 ? (row[cityCodeIndex] ?? "").trim() : "";
+        const productId =
+          productIdIndex >= 0 ? (row[productIdIndex] ?? "").trim() : "";
+        let productJson =
+          productJsonIndex >= 0 ? (row[productJsonIndex] ?? "").trim() : "";
+
+        // Google Sheets等でクォートが崩れて列が分割された場合の救済
+        if (!productJson && productJsonIndex >= 0 && row.length > productJsonIndex) {
+          const tail = row.slice(productJsonIndex).join(",").trim();
+          if (tail) {
+            productJson = tail;
+          }
+        }
 
         const item: UploadItem = productJson
           ? {
