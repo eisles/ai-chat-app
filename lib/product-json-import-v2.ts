@@ -696,21 +696,29 @@ export async function getQueueStatsV2(jobId: string): Promise<ImportQueueStatsV2
 
 export async function claimPendingItemsV2(jobId: string, limit: number) {
   const db = await ensureProductImportTablesV2();
+  // 2段階でIDを拾ってから更新（特定環境でUPDATE/CTEが0件になる問題の回避）
+  const pickedIds = (await db`
+    select id
+    from public.product_import_items_v2
+    where job_id = ${jobId}
+      and status = 'pending'
+      and (next_retry_at is null or next_retry_at <= now())
+    order by row_index
+    limit ${limit}
+  `) as Array<{ id: string }>;
+
+  if (pickedIds.length === 0) return [];
+
+  const idList = pickedIds.map((row) => row.id);
   return (await db`
     update public.product_import_items_v2
     set status = 'processing',
         attempt_count = attempt_count + 1,
+        processing_started_at = now(),
         updated_at = now()
-    where id in (
-      select id
-      from public.product_import_items_v2
-      where job_id = ${jobId}
-        and status = 'pending'
-        and (next_retry_at is null or next_retry_at <= now())
-      order by row_index
-      limit ${limit}
-      for update skip locked
-    )
+    where job_id = ${jobId}
+      and status = 'pending'
+      and id = any(${idList}::uuid[])
     returning id, row_index, city_code, product_id, product_json, attempt_count
   `) as Array<{
     id: string;

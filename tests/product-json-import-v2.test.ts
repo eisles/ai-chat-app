@@ -16,6 +16,14 @@ const mockState = vi.hoisted(() => {
     ) {
       return [{ product_id: "1001" }, { product_id: "1002" }];
     }
+    if (
+      sql.includes("select id") &&
+      sql.includes("from public.product_import_items_v2") &&
+      sql.includes("status = 'pending'") &&
+      sql.includes("order by row_index")
+    ) {
+      return [{ id: "00000000-0000-0000-0000-000000000002" }];
+    }
     // 簡易モック: `returning id` を使う更新だけ、戻り値が必要なケースがある
     if (
       sql.includes("update public.product_import_items_v2") &&
@@ -92,13 +100,16 @@ describe("product-json-import-v2", () => {
 
   it("claims pending items with retry window and attempt_count increment", async () => {
     await claimPendingItemsV2("00000000-0000-0000-0000-000000000000", 10);
-    const call = mockState.calls.find((x) =>
+    const updateCall = mockState.calls.find((x) =>
       x.sql.includes("update public.product_import_items_v2")
     );
-    expect(call).toBeTruthy();
-    expect(call?.sql).toContain("attempt_count = attempt_count + 1");
-    expect(call?.sql).toContain("next_retry_at is null or next_retry_at <= now()");
-    expect(call?.sql.toLowerCase()).toContain("for update skip locked");
+    const selectCall = mockState.calls.find((x) =>
+      x.sql.includes("from public.product_import_items_v2") &&
+      x.sql.includes("next_retry_at is null or next_retry_at <= now()")
+    );
+    expect(updateCall).toBeTruthy();
+    expect(selectCall).toBeTruthy();
+    expect(updateCall?.sql).toContain("attempt_count = attempt_count + 1");
   });
 
   it("queries queue stats using filtered counts and next_retry_at", async () => {
