@@ -1,6 +1,7 @@
 import {
   claimPendingItemsV2,
   getImportJobV2,
+  markJobStartedV2,
   markItemsSkippedBulkV2,
   markItemFailureV2,
   markItemRetryV2,
@@ -599,6 +600,8 @@ export async function POST(req: Request) {
     const limit = parseLimit(payload.limit);
     const timeBudgetMs = parseTimeBudgetMs(payload.timeBudgetMs);
     const deadline = Date.now() + timeBudgetMs;
+
+    await markJobStartedV2(jobId);
 
     // サーバ側タイムアウト等で processing のまま残った行を救済（再開性の担保）
     await requeueStaleProcessingItemsV2({

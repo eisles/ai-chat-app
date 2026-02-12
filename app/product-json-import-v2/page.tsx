@@ -35,6 +35,7 @@ type Job = {
   doImageCaptions: boolean;
   doImageVectors: boolean;
   captionImageInput: CaptionImageInputMode;
+  startedAt: string;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -64,8 +65,10 @@ type UploadItem = {
 };
 
 type FollowupConfig = {
+  text: boolean;
   captions: boolean;
   vectors: boolean;
+  existingBehavior: ExistingBehavior;
   captionImageInput: CaptionImageInputMode;
   includeFailed: boolean;
   includeSkipped: boolean;
@@ -252,6 +255,7 @@ export default function ProductJsonImportV2Page() {
     open: boolean;
     job: Job | null;
   }>({ open: false, job: null });
+  const [addingJobs, setAddingJobs] = useState<Record<string, boolean>>({});
   const [uploadProgress, setUploadProgress] = useState<{
     readBytes: number;
     totalBytes: number;
@@ -365,8 +369,10 @@ export default function ProductJsonImportV2Page() {
       for (const jobItem of nextJobs) {
         if (!next[jobItem.id]) {
           next[jobItem.id] = {
+            text: false,
             captions: true,
             vectors: true,
+            existingBehavior: jobItem.existingBehavior ?? "skip",
             captionImageInput: jobItem.captionImageInput ?? "url",
             includeFailed: false,
             includeSkipped: true,
@@ -454,6 +460,9 @@ export default function ProductJsonImportV2Page() {
       qs: JobResponse["queueStats"] | undefined
     ): number => {
       const fallback = 5000;
+      if (qs?.pendingReadyCount && qs.pendingReadyCount > 0) {
+        return 200;
+      }
       if (!qs?.nextRetryAt) return fallback;
       const next = new Date(qs.nextRetryAt).getTime();
       if (Number.isNaN(next)) return fallback;
@@ -506,6 +515,29 @@ export default function ProductJsonImportV2Page() {
       if (timer) clearTimeout(timer);
     };
   }, [job, isRunning, limit, timeBudgetMs]);
+
+  useEffect(() => {
+    if (!job) return;
+    if (job.doTextEmbedding && !job.doImageCaptions && !job.doImageVectors) {
+      const limitValue = Number(limit);
+      const timeValue = Number(timeBudgetMs);
+      const textValue = Number(textConcurrency);
+      if (!Number.isFinite(limitValue) || limitValue < 20) {
+        setLimit("20");
+      }
+      if (!Number.isFinite(timeValue) || timeValue < 25000) {
+        setTimeBudgetMs("25000");
+      }
+      if (!Number.isFinite(textValue) || textValue < 4) {
+        setTextConcurrency("4");
+      }
+    }
+  }, [
+    job?.id,
+    job?.doTextEmbedding,
+    job?.doImageCaptions,
+    job?.doImageVectors,
+  ]);
 
   async function handleUpload(event: React.SyntheticEvent, mode: "new" | "resume") {
     event.preventDefault();
@@ -844,8 +876,10 @@ export default function ProductJsonImportV2Page() {
     followupOverride?: FollowupConfig
   ) {
     const fallback: FollowupConfig = {
+      text: false,
       captions: true,
       vectors: true,
+      existingBehavior: target.existingBehavior ?? "skip",
       captionImageInput: target.captionImageInput ?? "url",
       includeFailed: false,
       includeSkipped: true,
@@ -855,17 +889,18 @@ export default function ProductJsonImportV2Page() {
     if (!jobFollowups[target.id]) {
       setJobFollowups((prev) => ({ ...prev, [target.id]: followup }));
     }
-    if (!followup.captions && !followup.vectors) {
-      throw new Error("追加処理（キャプション/ベクトル）を選択してください");
+    if (!followup.text && !followup.captions && !followup.vectors) {
+      throw new Error("追加処理（テキスト/キャプション/ベクトル）を選択してください");
     }
     const res = await fetch(`/api/product-json-import-v2/jobs/${target.id}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         action: "add_processing",
-        doTextEmbedding: false,
+        doTextEmbedding: followup.text,
         doImageCaptions: followup.captions,
         doImageVectors: followup.vectors,
+        existingBehavior: followup.existingBehavior,
         captionImageInput: followup.captionImageInput,
         includeFailed: followup.includeFailed,
         includeSkipped: followup.includeSkipped,
@@ -909,9 +944,15 @@ export default function ProductJsonImportV2Page() {
     if (minutes > 0) return `${minutes}m ${seconds}s`;
     return `${seconds}s`;
   };
+  const getJobStartAt = (jobValue: Job | null) => {
+    if (!jobValue) return null;
+    return jobValue.startedAt ?? jobValue.createdAt ?? null;
+  };
   const formatAvgPerItem = (jobValue: Job | null) => {
     if (!jobValue || jobValue.processedCount === 0) return "-";
-    const startDate = new Date(jobValue.createdAt);
+    const startAt = getJobStartAt(jobValue);
+    if (!startAt) return "-";
+    const startDate = new Date(startAt);
     const endDate = jobValue.completedAt ? new Date(jobValue.completedAt) : new Date();
     if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
       return "-";
@@ -1109,6 +1150,9 @@ export default function ProductJsonImportV2Page() {
               件 / 最終行 {resumeState.lastRowIndexSent}
             </div>
           )}
+          <div className="text-xs text-muted-foreground">
+            再開判定は「ファイル名・サイズ・最終更新日時」が一致する場合のみ有効です。
+          </div>
           {resumeState &&
             file &&
             (resumeState.fileName !== file.name ||
@@ -1193,9 +1237,9 @@ export default function ProductJsonImportV2Page() {
                 queue: pending_ready={queueStats.pendingReadyCount} pending_delayed={queueStats.pendingDelayedCount} processing={queueStats.processingCount} next_retry_at={formatJst(queueStats.nextRetryAt)}
               </div>
             )}
-            <div>startedAt: {formatJst(job.createdAt)}</div>
+            <div>startedAt: {formatJst(job.startedAt)}</div>
             <div>completedAt: {formatJst(job.completedAt)}</div>
-            <div>elapsed: {formatElapsed(job.createdAt, job.completedAt)}</div>
+            <div>elapsed: {formatElapsed(getJobStartAt(job), job.completedAt)}</div>
             <div>avg/item: {formatAvgPerItem(job)}</div>
             {lastRun?.itemReports && (
               <div>avg/item (last run, success only): {lastRunAvgSeconds}</div>
@@ -1455,14 +1499,17 @@ export default function ProductJsonImportV2Page() {
                 success: false,
               };
               const followup = jobFollowups[jobItem.id] ?? {
+                text: false,
                 captions: true,
                 vectors: true,
+                existingBehavior: jobItem.existingBehavior ?? "skip",
                 captionImageInput: "url" as CaptionImageInputMode,
                 includeFailed: false,
                 includeSkipped: true,
                 includeSuccess: true,
               };
               const isDeleting = deletingJobs[jobItem.id] ?? false;
+              const isAdding = addingJobs[jobItem.id] ?? false;
               const isPreviewOpen = jobPreviewOpen[jobItem.id] ?? false;
               const previewItems = jobPreviews[jobItem.id];
               const previewError = jobPreviewError[jobItem.id];
@@ -1612,6 +1659,22 @@ export default function ProductJsonImportV2Page() {
                       <label className="flex items-center gap-1">
                         <input
                           type="checkbox"
+                          checked={followup.text}
+                          onChange={(event) =>
+                            setJobFollowups((prev) => ({
+                              ...prev,
+                              [jobItem.id]: {
+                                ...followup,
+                                text: event.target.checked,
+                              },
+                            }))
+                          }
+                        />
+                        <span>テキスト</span>
+                      </label>
+                      <label className="flex items-center gap-1">
+                        <input
+                          type="checkbox"
                           checked={followup.captions}
                           onChange={(event) =>
                             setJobFollowups((prev) => ({
@@ -1641,6 +1704,34 @@ export default function ProductJsonImportV2Page() {
                         />
                         <span>画像ベクトル</span>
                       </label>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span className="text-muted-foreground">既存データの扱い:</span>
+                      <Select
+                        value={followup.existingBehavior}
+                        onValueChange={(value) =>
+                          setJobFollowups((prev) => ({
+                            ...prev,
+                            [jobItem.id]: {
+                              ...followup,
+                              existingBehavior: value as ExistingBehavior,
+                            },
+                          }))
+                        }
+                      >
+                        <SelectTrigger className="h-8 w-[260px] text-xs">
+                          <SelectValue placeholder="既存データの扱い" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="skip">skip（既存があればスキップ）</SelectItem>
+                          <SelectItem value="delete_then_insert">
+                            delete_then_insert（削除して再登録）
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span className="text-muted-foreground">caption入力:</span>
                       <Select
                         value={followup.captionImageInput}
                         onValueChange={(value) =>
@@ -1716,15 +1807,15 @@ export default function ProductJsonImportV2Page() {
                     </div>
                     <Button
                       type="button"
-                      disabled={isDeleting}
+                      disabled={isDeleting || isAdding}
                       onClick={async () => {
                         setAddDialog({ open: true, job: jobItem, followup });
                       }}
                     >
-                      このジョブを取り込みキューに設定
+                      {isAdding ? "キュー設定中..." : "このジョブを取り込みキューに設定"}
                     </Button>
                     <div className="text-xs text-muted-foreground">
-                      追加処理はテキスト埋め込みをOFFにして画像系のみ実行します。
+                      追加処理はチェックされた処理のみ実行します。
                     </div>
                   </div>
                   <div className="mt-3 flex flex-wrap items-center gap-3">
@@ -1780,7 +1871,7 @@ export default function ProductJsonImportV2Page() {
           <DialogHeader>
             <DialogTitle>このジョブを取り込みキューに設定しますか？</DialogTitle>
             <DialogDescription>
-              画像キャプション/画像ベクトルの追加処理を実行します。
+              チェックした処理だけを再実行します。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2 text-sm">
@@ -1796,8 +1887,15 @@ export default function ProductJsonImportV2Page() {
               })()}
             </div>
             <div>
-              追加処理: captions={addDialog.followup?.captions ? "on" : "off"},
+              追加処理: text={addDialog.followup?.text ? "on" : "off"}, captions=
+              {addDialog.followup?.captions ? "on" : "off"},
               vectors={addDialog.followup?.vectors ? "on" : "off"}
+            </div>
+            <div>
+              既存データの扱い:{" "}
+              {addDialog.followup?.existingBehavior === "delete_then_insert"
+                ? "delete_then_insert"
+                : "skip"}
             </div>
             <div>
               captionInput:{" "}
@@ -1816,11 +1914,20 @@ export default function ProductJsonImportV2Page() {
             >
               キャンセル
             </Button>
+            {addDialog.job && addingJobs[addDialog.job.id] && (
+              <div className="self-center text-xs text-muted-foreground">
+                取り込みキューに設定中...
+              </div>
+            )}
             <Button
               type="button"
               onClick={async () => {
                 if (!addDialog.job || !addDialog.followup) return;
                 try {
+                  setAddingJobs((prev) => ({
+                    ...prev,
+                    [addDialog.job!.id]: true,
+                  }));
                   await handleAddProcessing(addDialog.job, addDialog.followup);
                   setAddDialog({ open: false, job: null, followup: null });
                 } catch (actionError) {
@@ -1829,10 +1936,18 @@ export default function ProductJsonImportV2Page() {
                       ? actionError.message
                       : "追加処理に失敗しました"
                   );
+                } finally {
+                  setAddingJobs((prev) => {
+                    const next = { ...prev };
+                    if (addDialog.job) next[addDialog.job.id] = false;
+                    return next;
+                  });
                 }
               }}
             >
-              取り込みキューに設定
+              {addDialog.job && addingJobs[addDialog.job.id]
+                ? "設定中..."
+                : "取り込みキューに設定"}
             </Button>
           </DialogFooter>
         </DialogContent>

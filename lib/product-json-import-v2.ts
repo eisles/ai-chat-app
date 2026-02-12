@@ -23,6 +23,7 @@ export type ImportJobV2 = {
   doImageCaptions: boolean;
   doImageVectors: boolean;
   captionImageInput: CaptionImageInputMode;
+  startedAt: string;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -51,6 +52,7 @@ export type ImportJobSummaryV2 = {
   doImageCaptions: boolean;
   doImageVectors: boolean;
   captionImageInput: CaptionImageInputMode;
+  startedAt: string;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -72,6 +74,7 @@ export async function ensureProductImportTablesV2() {
       do_image_captions boolean not null default true,
       do_image_vectors boolean not null default true,
       caption_image_input text not null default 'url',
+      started_at timestamptz,
       created_at timestamptz default now(),
       updated_at timestamptz default now(),
       completed_at timestamptz
@@ -117,6 +120,10 @@ export async function ensureProductImportTablesV2() {
   await db`
     alter table public.product_import_jobs_v2
     alter column caption_image_input set default 'url'
+  `;
+  await db`
+    alter table public.product_import_jobs_v2
+    add column if not exists started_at timestamptz
   `;
 
   await db`
@@ -260,7 +267,8 @@ export async function createImportJobBaseV2(options: {
       do_text_embedding,
       do_image_captions,
       do_image_vectors,
-      caption_image_input
+      caption_image_input,
+      started_at
     )
     values (
       ${jobId},
@@ -274,7 +282,8 @@ export async function createImportJobBaseV2(options: {
       ${options.doTextEmbedding ?? true},
       ${options.doImageCaptions ?? true},
       ${options.doImageVectors ?? true},
-      ${options.captionImageInput ?? "url"}
+      ${options.captionImageInput ?? "url"},
+      null
     )
   `;
 
@@ -365,6 +374,7 @@ export async function getImportJobV2(jobId: string): Promise<ImportJobV2 | null>
       do_image_captions,
       do_image_vectors,
       caption_image_input,
+      started_at,
       created_at,
       updated_at,
       completed_at
@@ -384,6 +394,7 @@ export async function getImportJobV2(jobId: string): Promise<ImportJobV2 | null>
     do_image_captions: boolean;
     do_image_vectors: boolean;
     caption_image_input: string | null;
+    started_at: Date | null;
     created_at: Date;
     updated_at: Date;
     completed_at: Date | null;
@@ -405,6 +416,7 @@ export async function getImportJobV2(jobId: string): Promise<ImportJobV2 | null>
     doImageVectors: Boolean(row.do_image_vectors ?? true),
     captionImageInput:
       row.caption_image_input === "data_url" ? "data_url" : "url",
+    startedAt: (row.started_at ?? row.created_at).toISOString(),
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
     completedAt: row.completed_at ? row.completed_at.toISOString() : null,
@@ -428,6 +440,7 @@ export async function listImportJobsV2(limit: number) {
       do_image_captions,
       do_image_vectors,
       caption_image_input,
+      started_at,
       created_at,
       updated_at,
       completed_at
@@ -447,6 +460,7 @@ export async function listImportJobsV2(limit: number) {
     do_image_captions: boolean;
     do_image_vectors: boolean;
     caption_image_input: string | null;
+    started_at: Date | null;
     created_at: Date;
     updated_at: Date;
     completed_at: Date | null;
@@ -466,6 +480,7 @@ export async function listImportJobsV2(limit: number) {
     doImageVectors: Boolean(row.do_image_vectors ?? true),
     captionImageInput:
       row.caption_image_input === "data_url" ? "data_url" : "url",
+    startedAt: (row.started_at ?? row.created_at).toISOString(),
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
     completedAt: row.completed_at ? row.completed_at.toISOString() : null,
@@ -626,6 +641,7 @@ export async function requeueImportItemsV2(options: {
         success_count = greatest(success_count - ${successCount}, 0),
         failure_count = greatest(failure_count - ${failedCount}, 0),
         skipped_count = greatest(skipped_count - ${skippedCount}, 0),
+        started_at = null,
         status = case
           when greatest(processed_count - ${requeuedCount}, 0) >= total_count
             then 'completed'
@@ -641,6 +657,25 @@ export async function requeueImportItemsV2(options: {
   `;
 
   return { requeuedCount, successCount, failedCount, skippedCount };
+}
+
+export async function markJobStartedV2(jobId: string) {
+  const db = await ensureProductImportTablesV2();
+  const rows = (await db`
+    update public.product_import_jobs_v2
+    set status = case
+          when status = 'pending' then 'running'
+          else status
+        end,
+        started_at = case
+          when status = 'pending' then coalesce(started_at, now())
+          else started_at
+        end,
+        updated_at = now()
+    where id = ${jobId}
+    returning id
+  `) as Array<{ id: string }>;
+  return rows.length > 0;
 }
 
 export async function getFailedItemsV2(jobId: string, limit: number) {
@@ -970,6 +1005,10 @@ export async function updateJobStatusV2(jobId: string) {
       when processed_count >= total_count then 'completed'
       when status = 'pending' then 'running'
       else status
+    end,
+    started_at = case
+      when status = 'pending' then coalesce(started_at, now())
+      else started_at
     end,
     completed_at = case
       when processed_count >= total_count then coalesce(completed_at, now())
