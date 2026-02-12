@@ -210,6 +210,7 @@ export async function createImportJobBaseV2(options: {
   doImageCaptions?: boolean;
   doImageVectors?: boolean;
   captionImageInput?: CaptionImageInputMode;
+  forcePending?: boolean;
 }) {
   const db = await ensureProductImportTablesV2();
   const jobId = randomUUID();
@@ -219,7 +220,11 @@ export async function createImportJobBaseV2(options: {
   const failureCount = processedCount;
   const successCount = 0;
   const skippedCount = 0;
-  const status = processedCount >= totalCount ? "completed" : "pending";
+  const status = options.forcePending
+    ? "pending"
+    : processedCount >= totalCount
+      ? "completed"
+      : "pending";
 
   await db`
     insert into public.product_import_jobs_v2 (
@@ -265,13 +270,31 @@ export async function appendImportItemsV2(options: {
     status: "pending" | "failed";
     error?: string | null;
   }>;
+  updateJobCounts?: boolean;
 }) {
   const db = await ensureProductImportTablesV2();
+  const shouldUpdateJobCounts = options.updateJobCounts !== false;
 
   for (let offset = 0; offset < options.items.length; offset += INSERT_IMPORT_ITEMS_BATCH_SIZE) {
     const batch = options.items.slice(offset, offset + INSERT_IMPORT_ITEMS_BATCH_SIZE);
+    const batchInvalidCount = batch.filter((item) => item.status === "failed").length;
     const batchWithIds = batch.map((item) => ({ id: randomUUID(), ...item }));
     await insertImportItemsBatchV2(db, options.jobId, batchWithIds);
+    if (shouldUpdateJobCounts) {
+      await db`
+        update public.product_import_jobs_v2
+        set total_count = total_count + ${batch.length},
+            processed_count = processed_count + ${batchInvalidCount},
+            failure_count = failure_count + ${batchInvalidCount},
+            status = case
+              when (total_count + ${batch.length}) <= (processed_count + ${batchInvalidCount})
+                then 'completed'
+              else 'pending'
+            end,
+            updated_at = now()
+        where id = ${options.jobId}
+      `;
+    }
   }
 }
 
@@ -301,7 +324,7 @@ export async function createImportJobV2(options: {
     captionImageInput: options.captionImageInput,
   });
 
-  await appendImportItemsV2({ jobId, items: options.items });
+  await appendImportItemsV2({ jobId, items: options.items, updateJobCounts: false });
   return jobId;
 }
 

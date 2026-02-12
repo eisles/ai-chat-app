@@ -106,84 +106,23 @@ type AppendItemsResponse = {
   error?: string;
 };
 
-const UPLOAD_BATCH_SIZE = 200;
+const UPLOAD_MAX_ROWS = 200;
+const UPLOAD_MAX_BYTES = 1_000_000;
+const UPLOAD_STATE_KEY = "product-json-import-v2-upload";
 
 type CsvRow = Record<string, string>;
 
-function parseCsv(content: string) {
-  const rows: string[][] = [];
-  let current: string[] = [];
-  let cell = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < content.length; i += 1) {
-    const char = content[i];
-    const next = content[i + 1];
-
-    if (inQuotes) {
-      if (char === "\"") {
-        if (next === "\"") {
-          cell += "\"";
-          i += 1;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        cell += char;
-      }
-      continue;
-    }
-
-    if (char === "\"") {
-      inQuotes = true;
-      continue;
-    }
-    if (char === ",") {
-      current.push(cell);
-      cell = "";
-      continue;
-    }
-    if (char === "\n") {
-      current.push(cell);
-      rows.push(current);
-      current = [];
-      cell = "";
-      continue;
-    }
-    if (char === "\r") {
-      continue;
-    }
-    cell += char;
-  }
-
-  if (cell.length > 0 || current.length > 0) {
-    current.push(cell);
-    rows.push(current);
-  }
-
-  return rows;
-}
+type UploadResumeState = {
+  jobId: string;
+  fileName: string;
+  fileSize: number;
+  fileLastModified: number;
+  lastRowIndexSent: number;
+  uploadedItems: number;
+};
 
 function normalizeHeader(header: string) {
   return header.trim().toLowerCase();
-}
-
-function mapCsvRows(rows: string[][]): CsvRow[] {
-  if (rows.length === 0) {
-    return [];
-  }
-  const [headerRow, ...dataRows] = rows;
-  const headers = headerRow.map((value) => normalizeHeader(value));
-
-  return dataRows
-    .map((row) => {
-      const record: CsvRow = {};
-      headers.forEach((header, index) => {
-        record[header] = (row[index] ?? "").trim();
-      });
-      return record;
-    })
-    .filter((record) => Object.values(record).some((value) => value.length > 0));
 }
 
 function getColumn(record: CsvRow, keys: string[]) {
@@ -203,6 +142,27 @@ async function readJsonResponse<T>(res: Response): Promise<T> {
   }
   const text = await res.text();
   throw new Error(text || `HTTP ${res.status}`);
+}
+
+function estimateItemBytes(item: UploadItem) {
+  return (
+    (item.productJson?.length ?? 0) +
+    (item.productId?.length ?? 0) +
+    (item.cityCode?.length ?? 0) +
+    200
+  );
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size.toFixed(1)}${units[index]}`;
 }
 
 export default function ProductJsonImportV2Page() {
@@ -228,9 +188,46 @@ export default function ProductJsonImportV2Page() {
   const [isUploading, setIsUploading] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<{
+    readBytes: number;
+    totalBytes: number;
+    uploadedItems: number;
+  } | null>(null);
+  const [resumeState, setResumeState] = useState<UploadResumeState | null>(null);
   const isTicking = useRef(false);
   const [consecutiveRunErrors, setConsecutiveRunErrors] = useState(0);
   const MAX_CONSECUTIVE_RUN_ERRORS = 3;
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(UPLOAD_STATE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as UploadResumeState;
+      if (
+        typeof parsed?.jobId === "string" &&
+        typeof parsed?.fileName === "string" &&
+        typeof parsed?.fileSize === "number" &&
+        typeof parsed?.fileLastModified === "number" &&
+        typeof parsed?.lastRowIndexSent === "number" &&
+        typeof parsed?.uploadedItems === "number"
+      ) {
+        setResumeState(parsed);
+      }
+    } catch {
+      // ignore invalid saved state
+    }
+  }, []);
+
+  const updateResumeState = (next: UploadResumeState | null) => {
+    setResumeState(next);
+    if (typeof window === "undefined") return;
+    if (!next) {
+      window.localStorage.removeItem(UPLOAD_STATE_KEY);
+      return;
+    }
+    window.localStorage.setItem(UPLOAD_STATE_KEY, JSON.stringify(next));
+  };
 
   async function fetchStatus(jobId: string) {
     const res = await fetch(`/api/product-json-import-v2?jobId=${jobId}`);
@@ -334,7 +331,7 @@ export default function ProductJsonImportV2Page() {
     };
   }, [job, isRunning, limit, timeBudgetMs]);
 
-  async function handleUpload(event: React.FormEvent) {
+  async function handleUpload(event: React.SyntheticEvent, mode: "new" | "resume") {
     event.preventDefault();
     if (!file) {
       setError("CSVファイルを選択してください");
@@ -344,66 +341,84 @@ export default function ProductJsonImportV2Page() {
     setIsUploading(true);
 
     try {
-      const content = await file.text();
-      const rows = mapCsvRows(parseCsv(content));
-      if (rows.length === 0) {
-        throw new Error("CSVにデータ行がありません");
+      const canResume =
+        mode === "resume" &&
+        resumeState &&
+        resumeState.fileName === file.name &&
+        resumeState.fileSize === file.size &&
+        resumeState.fileLastModified === file.lastModified;
+      if (mode === "resume" && !canResume) {
+        throw new Error("再開情報が見つかりません。新規で作成してください。");
       }
 
-      let invalidCount = 0;
-      const items: UploadItem[] = rows.map((record, index) => {
-        const cityCode = getColumn(record, ["city_code", "city_cd", "citycode"]);
-        const productId = getColumn(record, ["product_id", "productid", "id"]);
-        const productJson = getColumn(record, ["product_json", "json", "product"]);
+      let jobId = "";
+      let skipUntilRowIndex = 0;
+      let uploadedItems = 0;
 
-        if (!productJson) {
-          invalidCount += 1;
-          return {
-            rowIndex: index + 2,
-            cityCode: cityCode || null,
-            productId: productId || null,
-            productJson: "",
-            status: "failed",
-            error: "product_json is required",
-          };
+      if (canResume && resumeState) {
+        jobId = resumeState.jobId;
+        skipUntilRowIndex = resumeState.lastRowIndexSent;
+        uploadedItems = resumeState.uploadedItems;
+        try {
+          await fetchStatus(jobId);
+        } catch {
+          updateResumeState(null);
+          throw new Error("再開対象のジョブが見つかりません。新規で作成してください。");
         }
-
-        return {
-          rowIndex: index + 2,
-          cityCode: cityCode || null,
-          productId: productId || null,
-          productJson,
-          status: "pending",
-        };
-      });
-
-      const createRes = await fetch("/api/product-json-import-v2", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "create_job",
-          totalCount: items.length,
-          invalidCount,
-          existingBehavior,
-          doTextEmbedding,
-          doImageCaptions,
-          doImageVectors,
-          captionImageInput,
-        }),
-      });
-      const createData = await readJsonResponse<CreateJobResponse>(createRes);
-      if (!createData.ok || !createData.jobId) {
-        throw new Error(createData.error ?? "取り込みジョブ作成に失敗しました");
+      } else {
+        updateResumeState(null);
+        const createRes = await fetch("/api/product-json-import-v2", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "create_job",
+            totalCount: 0,
+            invalidCount: 0,
+            existingBehavior,
+            doTextEmbedding,
+            doImageCaptions,
+            doImageVectors,
+            captionImageInput,
+            forcePending: true,
+          }),
+        });
+        const createData = await readJsonResponse<CreateJobResponse>(createRes);
+        if (!createData.ok || !createData.jobId) {
+          throw new Error(createData.error ?? "取り込みジョブ作成に失敗しました");
+        }
+        jobId = createData.jobId;
+        updateResumeState({
+          jobId,
+          fileName: file.name,
+          fileSize: file.size,
+          fileLastModified: file.lastModified,
+          lastRowIndexSent: 0,
+          uploadedItems: 0,
+        });
       }
 
-      for (let offset = 0; offset < items.length; offset += UPLOAD_BATCH_SIZE) {
-        const batch = items.slice(offset, offset + UPLOAD_BATCH_SIZE);
+      const reader = file.stream().getReader();
+      const decoder = new TextDecoder("utf-8");
+      let headerRow: string[] | null = null;
+      let headers: string[] = [];
+      let currentRow: string[] = [];
+      let cell = "";
+      let inQuotes = false;
+      let batch: UploadItem[] = [];
+      let batchBytes = 0;
+      let dataRowIndex = 0;
+      let readBytes = 0;
+      const totalBytes = file.size;
+      setUploadProgress({ readBytes, totalBytes, uploadedItems });
+
+      const flushBatch = async () => {
+        if (batch.length === 0) return;
         const appendRes = await fetch("/api/product-json-import-v2", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             action: "append_items",
-            jobId: createData.jobId,
+            jobId,
             items: batch,
           }),
         });
@@ -411,15 +426,141 @@ export default function ProductJsonImportV2Page() {
         if (!appendData.ok) {
           throw new Error(appendData.error ?? "取り込み明細の追加に失敗しました");
         }
+        uploadedItems += batch.length;
+        const lastRowIndexSent = batch[batch.length - 1]?.rowIndex ?? skipUntilRowIndex;
+        updateResumeState({
+          jobId,
+          fileName: file.name,
+          fileSize: file.size,
+          fileLastModified: file.lastModified,
+          lastRowIndexSent,
+          uploadedItems,
+        });
+        batch = [];
+        batchBytes = 0;
+        setUploadProgress({ readBytes, totalBytes, uploadedItems });
+      };
+
+      const finalizeRow = async () => {
+        const row = [...currentRow, cell];
+        currentRow = [];
+        cell = "";
+        if (!headerRow) {
+          headerRow = row;
+          headers = headerRow.map((value) => normalizeHeader(value));
+          return;
+        }
+        const rowIndex = dataRowIndex + 2;
+        dataRowIndex += 1;
+        if (rowIndex <= skipUntilRowIndex) {
+          return;
+        }
+        const record: CsvRow = {};
+        headers.forEach((header, index) => {
+          record[header] = (row[index] ?? "").trim();
+        });
+        if (!Object.values(record).some((value) => value.length > 0)) {
+          return;
+        }
+        const cityCode = getColumn(record, ["city_code", "city_cd", "citycode"]);
+        const productId = getColumn(record, ["product_id", "productid", "id"]);
+        const productJson = getColumn(record, ["product_json", "json", "product"]);
+
+        const item: UploadItem = productJson
+          ? {
+              rowIndex,
+              cityCode: cityCode || null,
+              productId: productId || null,
+              productJson,
+              status: "pending",
+            }
+          : {
+              rowIndex,
+              cityCode: cityCode || null,
+              productId: productId || null,
+              productJson: "",
+              status: "failed",
+              error: "product_json is required",
+            };
+
+        const itemBytes = estimateItemBytes(item);
+        if (
+          batch.length > 0 &&
+          (batch.length >= UPLOAD_MAX_ROWS || batchBytes + itemBytes > UPLOAD_MAX_BYTES)
+        ) {
+          await flushBatch();
+        }
+        batch.push(item);
+        batchBytes += itemBytes;
+        if (batch.length >= UPLOAD_MAX_ROWS || batchBytes >= UPLOAD_MAX_BYTES) {
+          await flushBatch();
+        }
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (value) {
+          readBytes += value.length;
+          setUploadProgress({ readBytes, totalBytes, uploadedItems });
+          const chunk = decoder.decode(value, { stream: !done });
+          for (let i = 0; i < chunk.length; i += 1) {
+            const char = chunk[i];
+            const next = chunk[i + 1];
+
+            if (inQuotes) {
+              if (char === "\"") {
+                if (next === "\"") {
+                  cell += "\"";
+                  i += 1;
+                } else {
+                  inQuotes = false;
+                }
+              } else {
+                cell += char;
+              }
+              continue;
+            }
+
+            if (char === "\"") {
+              inQuotes = true;
+              continue;
+            }
+            if (char === ",") {
+              currentRow.push(cell);
+              cell = "";
+              continue;
+            }
+            if (char === "\n") {
+              await finalizeRow();
+              continue;
+            }
+            if (char === "\r") {
+              continue;
+            }
+            cell += char;
+          }
+        }
+        if (done) break;
       }
 
-      await fetchStatus(createData.jobId);
+      if (cell.length > 0 || currentRow.length > 0) {
+        await finalizeRow();
+      }
+
+      if (!headerRow) {
+        throw new Error("CSVヘッダーがありません");
+      }
+
+      await flushBatch();
+      await fetchStatus(jobId);
+      updateResumeState(null);
     } catch (uploadError) {
       setError(
         uploadError instanceof Error ? uploadError.message : "取り込みに失敗しました"
       );
     } finally {
       setIsUploading(false);
+      setUploadProgress(null);
     }
   }
 
@@ -487,7 +628,10 @@ export default function ProductJsonImportV2Page() {
 
       <Card className="border bg-card/60 p-4 shadow-sm sm:p-6">
         <h2 className="text-lg font-semibold">CSVアップロード</h2>
-        <form className="mt-4 flex flex-col gap-4" onSubmit={handleUpload}>
+        <form
+          className="mt-4 flex flex-col gap-4"
+          onSubmit={(event) => handleUpload(event, "new")}
+        >
           <input
             type="file"
             accept=".csv,text/csv"
@@ -565,6 +709,60 @@ export default function ProductJsonImportV2Page() {
           <Button type="submit" disabled={isUploading}>
             {isUploading ? "アップロード中..." : "ジョブ作成"}
           </Button>
+          {resumeState && (
+            <div className="text-xs text-muted-foreground">
+              再開情報: file={resumeState.fileName} / 送信済み {resumeState.uploadedItems}
+              件 / 最終行 {resumeState.lastRowIndexSent}
+            </div>
+          )}
+          {resumeState &&
+            file &&
+            (resumeState.fileName !== file.name ||
+              resumeState.fileSize !== file.size ||
+              resumeState.fileLastModified !== file.lastModified) && (
+              <div className="text-xs text-muted-foreground">
+                選択中のファイルと再開情報が一致しません。再開する場合は同じCSVを選択してください。
+              </div>
+            )}
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={
+                isUploading ||
+                !file ||
+                !resumeState ||
+                resumeState.fileName !== file.name ||
+                resumeState.fileSize !== file.size ||
+                resumeState.fileLastModified !== file.lastModified
+              }
+              onClick={(event) => handleUpload(event, "resume")}
+            >
+              アップロード再開
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={isUploading}
+              onClick={() => updateResumeState(null)}
+            >
+              再開情報を破棄
+            </Button>
+          </div>
+          {isUploading && uploadProgress && (
+            <div className="text-xs text-muted-foreground">
+              読み込み: {formatBytes(uploadProgress.readBytes)} /{" "}
+              {formatBytes(uploadProgress.totalBytes)}（
+              {Math.min(
+                100,
+                Math.round(
+                  (uploadProgress.readBytes / Math.max(1, uploadProgress.totalBytes)) *
+                    100
+                )
+              )}
+              %） / 送信済み: {uploadProgress.uploadedItems}件
+            </div>
+          )}
         </form>
       </Card>
 

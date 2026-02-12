@@ -44,6 +44,7 @@ type CreateJobPayload = {
   doImageCaptions?: boolean;
   doImageVectors?: boolean;
   captionImageInput?: string | null;
+  forcePending?: boolean;
 };
 
 type AppendItemsPayload = {
@@ -249,6 +250,9 @@ export async function POST(req: Request) {
           ),
           captionImageInput: parseCaptionImageInput(
             (payload as CreateJobPayload).captionImageInput
+          ),
+          forcePending: parseBoolean(
+            (payload as CreateJobPayload).forcePending
           ),
         });
         return Response.json({ ok: true, jobId });

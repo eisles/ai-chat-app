@@ -30,6 +30,7 @@ vi.mock("@/lib/neon", () => {
 });
 
 import {
+  appendImportItemsV2,
   createImportJobV2,
   getQueueStatsV2,
   INSERT_IMPORT_ITEMS_BATCH_SIZE,
@@ -154,6 +155,36 @@ describe("product-json-import-v2", () => {
         x.sql.includes("text_source = any(")
     );
     expect(call).toBeTruthy();
+  });
+
+  it("appends items and increments job counters", async () => {
+    await appendImportItemsV2({
+      jobId: "00000000-0000-0000-0000-000000000000",
+      items: [
+        {
+          rowIndex: 2,
+          cityCode: null,
+          productId: "1001",
+          productJson: "{}",
+          status: "pending",
+        },
+        {
+          rowIndex: 3,
+          cityCode: null,
+          productId: "1002",
+          productJson: "",
+          status: "failed",
+          error: "product_json is required",
+        },
+      ],
+    });
+
+    const updateJob = mockState.calls.find(
+      (x) =>
+        x.sql.includes("update public.product_import_jobs_v2") &&
+        x.sql.includes("total_count = total_count +")
+    );
+    expect(updateJob).toBeTruthy();
   });
 
   it("checks existing vectorized product ids using any()", async () => {
