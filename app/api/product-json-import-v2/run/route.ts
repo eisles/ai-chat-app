@@ -68,6 +68,11 @@ const CAPTION_CONCURRENCY = parseConcurrency(
   4,
   8
 );
+const TEXT_CONCURRENCY = parseConcurrency(
+  process.env.PRODUCT_IMPORT_V2_TEXT_CONCURRENCY,
+  2,
+  6
+);
 const VECTORIZE_CONCURRENCY = parseConcurrency(
   process.env.PRODUCT_IMPORT_V2_VECTORIZE_CONCURRENCY,
   2,
@@ -88,6 +93,7 @@ type RunPayload = {
   limit?: unknown;
   timeBudgetMs?: unknown;
   debugTimings?: unknown;
+  textConcurrency?: unknown;
   captionConcurrency?: unknown;
   vectorizeConcurrency?: unknown;
 };
@@ -567,6 +573,11 @@ export async function POST(req: Request) {
       throw new ApiError("jobIdが必要です", 400);
     }
     const debugTimings = parseDebugTimings(payload.debugTimings);
+    const textConcurrency = parseConcurrencyOverride(
+      payload.textConcurrency,
+      TEXT_CONCURRENCY,
+      6
+    );
     const captionConcurrency = parseConcurrencyOverride(
       payload.captionConcurrency,
       CAPTION_CONCURRENCY,
@@ -600,6 +611,7 @@ export async function POST(req: Request) {
     let retried = 0;
     let released = 0;
     const itemReports: ItemReport[] = [];
+    const isLightJob = job.doTextEmbedding && !job.doImageCaptions && !job.doImageVectors;
 
     while (Date.now() <= deadline - 500) {
       const items = await claimPendingItemsV2(jobId, limit);
@@ -675,6 +687,142 @@ export async function POST(req: Request) {
 
       const remainingItems = items.filter((item) => !skippedIdSet.has(item.id));
       if (remainingItems.length === 0) {
+        continue;
+      }
+
+      if (isLightJob) {
+        if (Date.now() > deadline - 500) {
+          const remainingIds = remainingItems.map((x) => x.id);
+          await releaseClaimedItemsV2({ jobId, itemIds: remainingIds });
+          released += remainingIds.length;
+          if (debugTimings) {
+            for (const remaining of remainingItems) {
+              itemReports.push({
+                itemId: remaining.id,
+                rowIndex: remaining.row_index,
+                productId: remaining.product_id ?? null,
+                cityCode: remaining.city_code ?? null,
+                outcome: "released",
+                attemptCount: remaining.attempt_count,
+                steps: [{ step: "released_due_to_time_budget", ms: 0 }],
+              });
+            }
+          }
+          continue;
+        }
+
+        const tasks = remainingItems.map((item) => async () => {
+          try {
+            const { outcome, steps } = await processProductItem({
+              itemId: item.id,
+              productJson: item.product_json,
+              productId: item.product_id,
+              cityCode: item.city_code,
+              existingBehavior: job.existingBehavior,
+              doTextEmbedding: job.doTextEmbedding,
+              doImageCaptions: job.doImageCaptions,
+              doImageVectors: job.doImageVectors,
+              captionImageInput: job.captionImageInput,
+              captionConcurrency,
+              vectorizeConcurrency,
+              knownProductJsonExists: item.product_id
+                ? existingTextIds.has(item.product_id)
+                : undefined,
+              knownCaptionExists: item.product_id
+                ? existingCaptionIds.has(item.product_id)
+                : undefined,
+              knownVectorExists: item.product_id
+                ? existingVectorIds.has(item.product_id)
+                : undefined,
+              debugTimings,
+            });
+            if (outcome === "skipped") {
+              await markItemSkippedV2({ itemId: item.id, jobId });
+              if (debugTimings) {
+                itemReports.push({
+                  itemId: item.id,
+                  rowIndex: item.row_index,
+                  productId: item.product_id ?? null,
+                  cityCode: item.city_code ?? null,
+                  outcome: "skipped",
+                  attemptCount: item.attempt_count,
+                  steps,
+                });
+              }
+            } else {
+              await markItemSuccessV2({ itemId: item.id, jobId });
+              if (debugTimings) {
+                itemReports.push({
+                  itemId: item.id,
+                  rowIndex: item.row_index,
+                  productId: item.product_id ?? null,
+                  cityCode: item.city_code ?? null,
+                  outcome: "success",
+                  attemptCount: item.attempt_count,
+                  steps,
+                });
+              }
+            }
+            processed += 1;
+            processedThisRun += 1;
+          } catch (error) {
+            const message = normalizeErrorMessage(
+              error instanceof Error ? error.message : "Unknown error"
+            );
+            const { retryable, errorCode } = classifyRetry(error);
+
+            if (retryable && item.attempt_count < MAX_RETRY_ATTEMPTS) {
+              const retryAfterSeconds = calcRetryAfterSeconds(item.attempt_count);
+              await markItemRetryV2({
+                itemId: item.id,
+                jobId,
+                error: message,
+                errorCode,
+                retryAfterSeconds,
+              });
+              retried += 1;
+              if (debugTimings) {
+                itemReports.push({
+                  itemId: item.id,
+                  rowIndex: item.row_index,
+                  productId: item.product_id ?? null,
+                  cityCode: item.city_code ?? null,
+                  outcome: "retry",
+                  attemptCount: item.attempt_count,
+                  steps: [{ step: "retry_scheduled", ms: 0 }],
+                  error: message,
+                  errorCode,
+                  retryAfterSeconds,
+                });
+              }
+              return;
+            }
+
+            await markItemFailureV2({
+              itemId: item.id,
+              jobId,
+              error: message,
+              errorCode,
+            });
+            processed += 1;
+            processedThisRun += 1;
+            if (debugTimings) {
+              itemReports.push({
+                itemId: item.id,
+                rowIndex: item.row_index,
+                productId: item.product_id ?? null,
+                cityCode: item.city_code ?? null,
+                outcome: "failed",
+                attemptCount: item.attempt_count,
+                steps: [{ step: "failed", ms: 0 }],
+                error: message,
+                errorCode,
+              });
+            }
+          }
+        });
+
+        await runWithConcurrency(tasks, textConcurrency);
         continue;
       }
 

@@ -186,6 +186,7 @@ export default function ProductJsonImportV2Page() {
     useState<CaptionImageInputMode>("url");
   const [limit, setLimit] = useState("5");
   const [timeBudgetMs, setTimeBudgetMs] = useState("10000");
+  const [textConcurrency, setTextConcurrency] = useState("2");
   const [captionConcurrency, setCaptionConcurrency] = useState("4");
   const [vectorizeConcurrency, setVectorizeConcurrency] = useState("2");
   const [debugTimings, setDebugTimings] = useState(true);
@@ -304,6 +305,7 @@ export default function ProductJsonImportV2Page() {
         limit: parseInt(limit, 10) || 5,
         timeBudgetMs: parseInt(timeBudgetMs, 10) || 10000,
         debugTimings,
+        textConcurrency: parseInt(textConcurrency, 10) || 2,
         captionConcurrency: parseInt(captionConcurrency, 10) || 4,
         vectorizeConcurrency: parseInt(vectorizeConcurrency, 10) || 2,
       }),
@@ -803,6 +805,9 @@ export default function ProductJsonImportV2Page() {
 
           <div className="flex flex-col gap-2 text-sm">
             <div className="font-medium">既存データの扱い</div>
+            <div className="text-xs text-muted-foreground">
+              skipは既存のテキスト/キャプション/ベクトルが全て揃っている場合にスキップします。delete_then_insertは既存を削除して再登録します。
+            </div>
             <Select
               value={existingBehavior}
               onValueChange={(value) => setExistingBehavior(value as ExistingBehavior)}
@@ -821,6 +826,9 @@ export default function ProductJsonImportV2Page() {
 
           <div className="space-y-2 text-sm">
             <div className="font-medium">処理フラグ（デフォルトON）</div>
+            <div className="text-xs text-muted-foreground">
+              必要な処理だけ有効にできます。画像系は処理時間が長くなります。
+            </div>
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
@@ -829,6 +837,9 @@ export default function ProductJsonImportV2Page() {
               />
               <span>テキスト埋め込み</span>
             </label>
+            <div className="text-xs text-muted-foreground pl-6">
+              商品名/説明をEmbedding化して検索に使います。
+            </div>
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
@@ -840,6 +851,9 @@ export default function ProductJsonImportV2Page() {
             <div className="flex flex-col gap-2 pl-6">
               <div className="text-xs text-muted-foreground">
                 キャプション入力方式（OpenAIへ渡す方法）
+              </div>
+              <div className="text-xs text-muted-foreground">
+                URLは高速。data URLは画像が外部から見えない場合の代替です。
               </div>
               <Select
                 value={captionImageInput}
@@ -867,6 +881,9 @@ export default function ProductJsonImportV2Page() {
               />
               <span>画像ベクトル</span>
             </label>
+            <div className="text-xs text-muted-foreground pl-6">
+              画像検索用のベクトルを作成します（重い処理）。
+            </div>
             <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
               <div className="font-medium text-foreground">
                 Vercelで進まない場合の推奨手順
@@ -1025,6 +1042,9 @@ export default function ProductJsonImportV2Page() {
               <label htmlFor="limit" className="text-xs text-muted-foreground">
                 limit
               </label>
+              <div className="text-[11px] text-muted-foreground">
+                1回の実行で拾う件数（大きいほど一回の処理が重くなります）
+              </div>
               <input
                 id="limit"
                 type="number"
@@ -1036,9 +1056,30 @@ export default function ProductJsonImportV2Page() {
               />
             </div>
             <div className="space-y-1">
+              <label htmlFor="textConcurrency" className="text-xs text-muted-foreground">
+                text並列
+              </label>
+              <div className="text-[11px] text-muted-foreground">
+                テキスト埋め込みの並列数。上げすぎると429が出ます。
+              </div>
+              <input
+                id="textConcurrency"
+                type="number"
+                min="1"
+                max="6"
+                value={textConcurrency}
+                onChange={(e) => setTextConcurrency(e.target.value)}
+                className="w-20 rounded-md border bg-background px-3 py-2 text-sm"
+                disabled={!job.doTextEmbedding}
+              />
+            </div>
+            <div className="space-y-1">
               <label htmlFor="timeBudgetMs" className="text-xs text-muted-foreground">
                 timeBudgetMs
               </label>
+              <div className="text-[11px] text-muted-foreground">
+                1回の実行で使う時間（ms）。Vercelは25,000程度推奨。
+              </div>
               <input
                 id="timeBudgetMs"
                 type="number"
@@ -1053,6 +1094,9 @@ export default function ProductJsonImportV2Page() {
               <label htmlFor="captionConcurrency" className="text-xs text-muted-foreground">
                 captions並列
               </label>
+              <div className="text-[11px] text-muted-foreground">
+                画像キャプションの並列数。上げすぎると429が出ます。
+              </div>
               <input
                 id="captionConcurrency"
                 type="number"
@@ -1068,6 +1112,9 @@ export default function ProductJsonImportV2Page() {
               <label htmlFor="vectorizeConcurrency" className="text-xs text-muted-foreground">
                 vectorize並列
               </label>
+              <div className="text-[11px] text-muted-foreground">
+                画像ベクトル化の並列数。上げすぎると失敗率が上がります。
+              </div>
               <input
                 id="vectorizeConcurrency"
                 type="number"
