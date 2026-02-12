@@ -135,6 +135,10 @@ function getColumn(record: CsvRow, keys: string[]) {
   return "";
 }
 
+const CITY_CODE_HEADERS = ["city_code", "city_cd", "citycode", "市区町村コード"];
+const PRODUCT_ID_HEADERS = ["product_id", "productid", "id", "お礼の品id", "お礼の品ID"];
+const PRODUCT_JSON_HEADERS = ["product_json", "json", "product", "jsonデータ", "ｊｓｏｎデータ"];
+
 async function readJsonResponse<T>(res: Response): Promise<T> {
   const contentType = res.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {
@@ -456,13 +460,13 @@ export default function ProductJsonImportV2Page() {
           headerRow = row;
           headers = headerRow.map((value) => normalizeHeader(value));
           cityCodeIndex = headers.findIndex((header) =>
-            ["city_code", "city_cd", "citycode"].includes(header)
+            CITY_CODE_HEADERS.includes(header)
           );
           productIdIndex = headers.findIndex((header) =>
-            ["product_id", "productid", "id"].includes(header)
+            PRODUCT_ID_HEADERS.includes(header)
           );
           productJsonIndex = headers.findIndex((header) =>
-            ["product_json", "json", "product"].includes(header)
+            PRODUCT_JSON_HEADERS.includes(header)
           );
           return;
         }
