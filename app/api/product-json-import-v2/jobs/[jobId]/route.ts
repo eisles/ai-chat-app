@@ -32,10 +32,10 @@ function parseStatuses(value: unknown) {
 
 export async function DELETE(
   req: Request,
-  { params }: { params: { jobId?: string } }
+  { params }: { params: Promise<{ jobId: string }> }
 ) {
   try {
-    const jobId = params.jobId ?? "";
+    const { jobId } = await params;
     if (!jobId) {
       throw new ApiError("jobIdが必要です", 400);
     }
@@ -58,10 +58,10 @@ export async function DELETE(
 
 export async function POST(
   req: Request,
-  { params }: { params: { jobId?: string } }
+  { params }: { params: Promise<{ jobId: string }> }
 ) {
   try {
-    const jobId = params.jobId ?? "";
+    const { jobId } = await params;
     if (!jobId) {
       throw new ApiError("jobIdが必要です", 400);
     }
