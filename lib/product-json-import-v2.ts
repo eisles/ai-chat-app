@@ -35,6 +35,24 @@ export type ImportQueueStatsV2 = {
   nextRetryAt: string | null;
 };
 
+export type ImportJobSummaryV2 = {
+  id: string;
+  status: string;
+  totalCount: number;
+  processedCount: number;
+  successCount: number;
+  failureCount: number;
+  skippedCount: number;
+  existingBehavior: ExistingProductBehavior;
+  doTextEmbedding: boolean;
+  doImageCaptions: boolean;
+  doImageVectors: boolean;
+  captionImageInput: CaptionImageInputMode;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+};
+
 export async function ensureProductImportTablesV2() {
   const db = getDb();
   await db`
@@ -388,6 +406,144 @@ export async function getImportJobV2(jobId: string): Promise<ImportJobV2 | null>
     updatedAt: row.updated_at.toISOString(),
     completedAt: row.completed_at ? row.completed_at.toISOString() : null,
   };
+}
+
+export async function listImportJobsV2(limit: number) {
+  const db = await ensureProductImportTablesV2();
+  const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+  const rows = (await db`
+    select
+      id,
+      status,
+      total_count,
+      processed_count,
+      success_count,
+      failure_count,
+      skipped_count,
+      existing_behavior,
+      do_text_embedding,
+      do_image_captions,
+      do_image_vectors,
+      caption_image_input,
+      created_at,
+      updated_at,
+      completed_at
+    from public.product_import_jobs_v2
+    order by created_at desc
+    limit ${safeLimit}
+  `) as Array<{
+    id: string;
+    status: string;
+    total_count: number;
+    processed_count: number;
+    success_count: number;
+    failure_count: number;
+    skipped_count: number;
+    existing_behavior: ExistingProductBehavior;
+    do_text_embedding: boolean;
+    do_image_captions: boolean;
+    do_image_vectors: boolean;
+    caption_image_input: string | null;
+    created_at: Date;
+    updated_at: Date;
+    completed_at: Date | null;
+  }>;
+
+  return rows.map((row) => ({
+    id: row.id,
+    status: row.status,
+    totalCount: Number(row.total_count),
+    processedCount: Number(row.processed_count),
+    successCount: Number(row.success_count),
+    failureCount: Number(row.failure_count),
+    skippedCount: Number(row.skipped_count ?? 0),
+    existingBehavior: row.existing_behavior ?? "skip",
+    doTextEmbedding: Boolean(row.do_text_embedding ?? true),
+    doImageCaptions: Boolean(row.do_image_captions ?? true),
+    doImageVectors: Boolean(row.do_image_vectors ?? true),
+    captionImageInput:
+      row.caption_image_input === "data_url" ? "data_url" : "url",
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+    completedAt: row.completed_at ? row.completed_at.toISOString() : null,
+  })) satisfies ImportJobSummaryV2[];
+}
+
+export async function deleteImportJobV2(jobId: string): Promise<boolean> {
+  const db = await ensureProductImportTablesV2();
+  const rows = (await db`
+    delete from public.product_import_jobs_v2
+    where id = ${jobId}
+    returning id
+  `) as Array<{ id: string }>;
+  return rows.length > 0;
+}
+
+export async function requeueImportItemsV2(options: {
+  jobId: string;
+  statuses: Array<"failed" | "skipped" | "success">;
+}) {
+  const db = await ensureProductImportTablesV2();
+  const uniqueStatuses = Array.from(new Set(options.statuses));
+  if (uniqueStatuses.length === 0) {
+    return { requeuedCount: 0, successCount: 0, failedCount: 0, skippedCount: 0 };
+  }
+
+  const rows = (await db`
+    with target as (
+      select id, status
+      from public.product_import_items_v2
+      where job_id = ${options.jobId}
+        and status = any(${uniqueStatuses}::text[])
+    ),
+    updated as (
+      update public.product_import_items_v2 as items
+      set status = 'pending',
+          error = null,
+          error_code = null,
+          next_retry_at = null,
+          processing_started_at = null,
+          current_step = null,
+          current_step_detail = null,
+          updated_at = now()
+      from target
+      where items.id = target.id
+      returning target.status as prev_status
+    )
+    select prev_status
+    from updated
+  `) as Array<{ prev_status: string }>;
+
+  const requeuedCount = rows.length;
+  if (requeuedCount === 0) {
+    return { requeuedCount: 0, successCount: 0, failedCount: 0, skippedCount: 0 };
+  }
+
+  const successCount = rows.filter((row) => row.prev_status === "success").length;
+  const failedCount = rows.filter((row) => row.prev_status === "failed").length;
+  const skippedCount = rows.filter((row) => row.prev_status === "skipped").length;
+
+  await db`
+    update public.product_import_jobs_v2
+    set processed_count = greatest(processed_count - ${requeuedCount}, 0),
+        success_count = greatest(success_count - ${successCount}, 0),
+        failure_count = greatest(failure_count - ${failedCount}, 0),
+        skipped_count = greatest(skipped_count - ${skippedCount}, 0),
+        status = case
+          when greatest(processed_count - ${requeuedCount}, 0) >= total_count
+            then 'completed'
+          else 'pending'
+        end,
+        completed_at = case
+          when greatest(processed_count - ${requeuedCount}, 0) >= total_count
+            then completed_at
+          else null
+        end,
+        updated_at = now()
+    where id = ${options.jobId}
+  `;
+
+  return { requeuedCount, successCount, failedCount, skippedCount };
 }
 
 export async function getFailedItemsV2(jobId: string, limit: number) {

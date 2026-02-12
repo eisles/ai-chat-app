@@ -72,6 +72,12 @@ type JobResponse = {
   error?: string;
 };
 
+type JobsResponse = {
+  ok: boolean;
+  jobs?: Job[];
+  error?: string;
+};
+
 type RunResponse = {
   ok: boolean;
   job?: Job | null;
@@ -204,6 +210,11 @@ export default function ProductJsonImportV2Page() {
   const isTicking = useRef(false);
   const [consecutiveRunErrors, setConsecutiveRunErrors] = useState(0);
   const MAX_CONSECUTIVE_RUN_ERRORS = 3;
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [jobsError, setJobsError] = useState<string | null>(null);
+  const [jobActions, setJobActions] = useState<
+    Record<string, { failed: boolean; skipped: boolean; success: boolean }>
+  >({});
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -249,6 +260,27 @@ export default function ProductJsonImportV2Page() {
     return data;
   }
 
+  async function fetchJobs() {
+    const res = await fetch("/api/product-json-import-v2/jobs?limit=30");
+    const data = await readJsonResponse<JobsResponse>(res);
+    if (!data.ok) {
+      throw new Error(data.error ?? "ジョブ一覧の取得に失敗しました");
+    }
+    const nextJobs = data.jobs ?? [];
+    setJobs(nextJobs);
+    setJobsError(null);
+    setJobActions((prev) => {
+      const next = { ...prev };
+      for (const jobItem of nextJobs) {
+        if (!next[jobItem.id]) {
+          next[jobItem.id] = { failed: true, skipped: false, success: false };
+        }
+      }
+      return next;
+    });
+    return nextJobs;
+  }
+
   async function runBatch() {
     if (!job) return null;
     const res = await fetch("/api/product-json-import-v2/run", {
@@ -274,6 +306,14 @@ export default function ProductJsonImportV2Page() {
     }
     return null;
   }
+
+  useEffect(() => {
+    fetchJobs().catch((fetchError) => {
+      const message =
+        fetchError instanceof Error ? fetchError.message : "ジョブ一覧の取得に失敗しました";
+      setJobsError(message);
+    });
+  }, []);
 
   useEffect(() => {
     if (!job || !isRunning) return;
@@ -608,6 +648,7 @@ export default function ProductJsonImportV2Page() {
 
       await flushBatch();
       await fetchStatus(jobId);
+      await fetchJobs();
       updateResumeState(null);
     } catch (uploadError) {
       setError(
@@ -617,6 +658,51 @@ export default function ProductJsonImportV2Page() {
       setIsUploading(false);
       setUploadProgress(null);
     }
+  }
+
+  async function handleDeleteJob(target: Job) {
+    const confirm = window.confirm(
+      `ジョブを削除しますか？\\njobId: ${target.id}\\n件数: ${target.totalCount}（success: ${target.successCount}, failed: ${target.failureCount}, skipped: ${target.skippedCount}）\\n※ items（CSVデータ）は削除されますが、downstream（埋め込み/画像ベクトル）は削除されません。`
+    );
+    if (!confirm) return;
+    const res = await fetch(`/api/product-json-import-v2/jobs/${target.id}`, {
+      method: "DELETE",
+    });
+    const data = await readJsonResponse<{ ok: boolean; error?: string }>(res);
+    if (!data.ok) {
+      throw new Error(data.error ?? "ジョブ削除に失敗しました");
+    }
+    if (resumeState?.jobId === target.id) {
+      updateResumeState(null);
+    }
+    await fetchJobs();
+  }
+
+  async function handleRequeueJob(target: Job) {
+    const selection = jobActions[target.id] ?? {
+      failed: true,
+      skipped: false,
+      success: false,
+    };
+    const statuses = [
+      selection.failed ? "failed" : null,
+      selection.skipped ? "skipped" : null,
+      selection.success ? "success" : null,
+    ].filter((value): value is "failed" | "skipped" | "success" => Boolean(value));
+    if (statuses.length === 0) {
+      throw new Error("再処理対象を選択してください");
+    }
+    const res = await fetch(`/api/product-json-import-v2/jobs/${target.id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "requeue", statuses }),
+    });
+    const data = await readJsonResponse<{ ok: boolean; error?: string }>(res);
+    if (!data.ok) {
+      throw new Error(data.error ?? "再処理に失敗しました");
+    }
+    await fetchStatus(target.id);
+    await fetchJobs();
   }
 
   const statusLabel = job ? `${job.processedCount}/${job.totalCount}` : "-";
@@ -1017,6 +1103,146 @@ export default function ProductJsonImportV2Page() {
           )}
         </Card>
       )}
+
+      <Card className="border bg-card/60 p-4 shadow-sm sm:p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold">ジョブ一覧</h2>
+          <Button type="button" variant="secondary" onClick={() => fetchJobs()}>
+            更新
+          </Button>
+        </div>
+        {jobsError && (
+          <div className="mt-3 text-sm text-destructive">{jobsError}</div>
+        )}
+        {jobs.length === 0 ? (
+          <div className="mt-3 text-sm text-muted-foreground">ジョブがありません。</div>
+        ) : (
+          <div className="mt-4 space-y-3 text-sm">
+            {jobs.map((jobItem) => {
+              const selection = jobActions[jobItem.id] ?? {
+                failed: true,
+                skipped: false,
+                success: false,
+              };
+              return (
+                <div
+                  key={jobItem.id}
+                  className="rounded-md border bg-muted/30 px-3 py-3"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-medium">jobId: {jobItem.id}</div>
+                    <div>status: {jobItem.status}</div>
+                  </div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    created: {formatJst(jobItem.createdAt)} / updated:{" "}
+                    {formatJst(jobItem.updatedAt)}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-3 text-xs">
+                    <div>
+                      counts: {jobItem.processedCount}/{jobItem.totalCount}（success:
+                      {jobItem.successCount} / failed:{jobItem.failureCount} / skipped:
+                      {jobItem.skippedCount}）
+                    </div>
+                    <div>
+                      flags: text={String(jobItem.doTextEmbedding)} captions=
+                      {String(jobItem.doImageCaptions)} vectors=
+                      {String(jobItem.doImageVectors)}
+                    </div>
+                    <div>existingBehavior: {jobItem.existingBehavior}</div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span className="text-muted-foreground">再処理対象:</span>
+                      <label className="flex items-center gap-1">
+                        <input
+                          type="checkbox"
+                          checked={selection.failed}
+                          onChange={(event) =>
+                            setJobActions((prev) => ({
+                              ...prev,
+                              [jobItem.id]: {
+                                ...selection,
+                                failed: event.target.checked,
+                              },
+                            }))
+                          }
+                        />
+                        <span>failed</span>
+                      </label>
+                      <label className="flex items-center gap-1">
+                        <input
+                          type="checkbox"
+                          checked={selection.skipped}
+                          onChange={(event) =>
+                            setJobActions((prev) => ({
+                              ...prev,
+                              [jobItem.id]: {
+                                ...selection,
+                                skipped: event.target.checked,
+                              },
+                            }))
+                          }
+                        />
+                        <span>skipped</span>
+                      </label>
+                      <label className="flex items-center gap-1">
+                        <input
+                          type="checkbox"
+                          checked={selection.success}
+                          onChange={(event) =>
+                            setJobActions((prev) => ({
+                              ...prev,
+                              [jobItem.id]: {
+                                ...selection,
+                                success: event.target.checked,
+                              },
+                            }))
+                          }
+                        />
+                        <span>success</span>
+                      </label>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={async () => {
+                        try {
+                          await handleRequeueJob(jobItem);
+                        } catch (actionError) {
+                          setError(
+                            actionError instanceof Error
+                              ? actionError.message
+                              : "再処理に失敗しました"
+                          );
+                        }
+                      }}
+                    >
+                      再処理
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      onClick={async () => {
+                        try {
+                          await handleDeleteJob(jobItem);
+                        } catch (actionError) {
+                          setError(
+                            actionError instanceof Error
+                              ? actionError.message
+                              : "ジョブ削除に失敗しました"
+                          );
+                        }
+                      }}
+                    >
+                      削除
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
 
       {error && (
         <Card className="border border-destructive/50 bg-destructive/5 p-4 text-sm text-destructive">
