@@ -216,39 +216,63 @@ export async function POST(req: Request) {
   try {
     const contentType = req.headers.get("content-type") ?? "";
     if (contentType.includes("application/json")) {
-      const payload = (await req.json()) as Partial<CreateJobPayload & AppendItemsPayload>;
-      if (payload.action === "create_job") {
-        const totalCount = parseRequiredNumber(payload.totalCount, "totalCount");
-        const invalidCount = parseRequiredNumber(payload.invalidCount, "invalidCount");
+      const payload = (await req.json()) as Partial<
+        CreateJobPayload | AppendItemsPayload
+      >;
+      const action = typeof payload.action === "string" ? payload.action : "";
+      if (action === "create_job") {
+        const totalCount = parseRequiredNumber(
+          (payload as CreateJobPayload).totalCount,
+          "totalCount"
+        );
+        const invalidCount = parseRequiredNumber(
+          (payload as CreateJobPayload).invalidCount,
+          "invalidCount"
+        );
         if (invalidCount > totalCount) {
           throw new ApiError("invalidCountがtotalCountを超えています", 400);
         }
         const jobId = await createImportJobBaseV2({
           totalCount,
           invalidCount,
-          existingBehavior: parseExistingBehavior(payload.existingBehavior),
-          doTextEmbedding: parseBoolean(payload.doTextEmbedding),
-          doImageCaptions: parseBoolean(payload.doImageCaptions),
-          doImageVectors: parseBoolean(payload.doImageVectors),
-          captionImageInput: parseCaptionImageInput(payload.captionImageInput),
+          existingBehavior: parseExistingBehavior(
+            (payload as CreateJobPayload).existingBehavior
+          ),
+          doTextEmbedding: parseBoolean(
+            (payload as CreateJobPayload).doTextEmbedding
+          ),
+          doImageCaptions: parseBoolean(
+            (payload as CreateJobPayload).doImageCaptions
+          ),
+          doImageVectors: parseBoolean(
+            (payload as CreateJobPayload).doImageVectors
+          ),
+          captionImageInput: parseCaptionImageInput(
+            (payload as CreateJobPayload).captionImageInput
+          ),
         });
         return Response.json({ ok: true, jobId });
       }
-      if (payload.action === "append_items") {
-        const jobId = typeof payload.jobId === "string" ? payload.jobId : "";
+      if (action === "append_items") {
+        const jobId =
+          typeof (payload as AppendItemsPayload).jobId === "string"
+            ? (payload as AppendItemsPayload).jobId
+            : "";
         if (!jobId) {
           throw new ApiError("jobIdが必要です", 400);
         }
-        if (!Array.isArray(payload.items)) {
+        if (!Array.isArray((payload as AppendItemsPayload).items)) {
           throw new ApiError("itemsが必要です", 400);
         }
-        if (payload.items.length === 0) {
+        if ((payload as AppendItemsPayload).items.length === 0) {
           return Response.json({ ok: true, inserted: 0 });
         }
-        if (payload.items.length > MAX_APPEND_ITEMS) {
+        if ((payload as AppendItemsPayload).items.length > MAX_APPEND_ITEMS) {
           throw new ApiError(`itemsは最大${MAX_APPEND_ITEMS}件までです`, 400);
         }
-        const items = payload.items.map((item) => parseJsonItem(item));
+        const items = (payload as AppendItemsPayload).items.map((item) =>
+          parseJsonItem(item)
+        );
         await appendImportItemsV2({ jobId, items });
         return Response.json({ ok: true, inserted: items.length });
       }

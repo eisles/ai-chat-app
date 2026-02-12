@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 // メンテナンスモード: MAINTENANCE_MODE=true で全リクエストにメンテナンス画面を表示
-export function middleware() {
+export function proxy() {
   const isMaintenanceMode = process.env.MAINTENANCE_MODE === "true";
 
   if (isMaintenanceMode) {
