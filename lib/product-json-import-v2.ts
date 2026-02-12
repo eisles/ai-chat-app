@@ -482,6 +482,29 @@ export async function deleteImportJobV2(jobId: string): Promise<boolean> {
   return rows.length > 0;
 }
 
+export async function updateImportJobFlagsV2(options: {
+  jobId: string;
+  existingBehavior?: ExistingProductBehavior;
+  doTextEmbedding?: boolean;
+  doImageCaptions?: boolean;
+  doImageVectors?: boolean;
+  captionImageInput?: CaptionImageInputMode;
+}) {
+  const db = await ensureProductImportTablesV2();
+  const rows = (await db`
+    update public.product_import_jobs_v2
+    set existing_behavior = coalesce(${options.existingBehavior ?? null}, existing_behavior),
+        do_text_embedding = coalesce(${options.doTextEmbedding ?? null}, do_text_embedding),
+        do_image_captions = coalesce(${options.doImageCaptions ?? null}, do_image_captions),
+        do_image_vectors = coalesce(${options.doImageVectors ?? null}, do_image_vectors),
+        caption_image_input = coalesce(${options.captionImageInput ?? null}, caption_image_input),
+        updated_at = now()
+    where id = ${options.jobId}
+    returning id
+  `) as Array<{ id: string }>;
+  return rows.length > 0;
+}
+
 export async function deleteDownstreamForJobV2(options: { jobId: string }) {
   const db = await ensureProductImportTablesV2();
   const rows = (await db`
