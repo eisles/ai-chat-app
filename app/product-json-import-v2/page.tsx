@@ -3,6 +3,14 @@
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -55,6 +63,15 @@ type UploadItem = {
   error?: string | null;
 };
 
+type FollowupConfig = {
+  captions: boolean;
+  vectors: boolean;
+  captionImageInput: CaptionImageInputMode;
+  includeFailed: boolean;
+  includeSkipped: boolean;
+  includeSuccess: boolean;
+};
+
 type JobResponse = {
   ok: boolean;
   job?: Job | null;
@@ -87,6 +104,19 @@ type JobActionResponse = {
     failedCount: number;
     skippedCount: number;
   };
+  error?: string;
+};
+
+type JobItemsResponse = {
+  ok: boolean;
+  items?: Array<{
+    rowIndex: number;
+    cityCode: string | null;
+    productId: string | null;
+    status: string;
+    error: string | null;
+    productJsonPreview: string | null;
+  }>;
   error?: string;
 };
 
@@ -212,6 +242,16 @@ export default function ProductJsonImportV2Page() {
   const [isUploading, setIsUploading] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [startDialogOpen, setStartDialogOpen] = useState(false);
+  const [addDialog, setAddDialog] = useState<{
+    open: boolean;
+    job: Job | null;
+    followup: FollowupConfig | null;
+  }>({ open: false, job: null, followup: null });
+  const [deleteDialog, setDeleteDialog] = useState<{
+    open: boolean;
+    job: Job | null;
+  }>({ open: false, job: null });
   const [uploadProgress, setUploadProgress] = useState<{
     readBytes: number;
     totalBytes: number;
@@ -229,18 +269,20 @@ export default function ProductJsonImportV2Page() {
   const [jobActions, setJobActions] = useState<
     Record<string, { failed: boolean; skipped: boolean; success: boolean }>
   >({});
-  const [jobFollowups, setJobFollowups] = useState<
-    Record<
-      string,
-      {
-        captions: boolean;
-        vectors: boolean;
-        captionImageInput: CaptionImageInputMode;
-        includeFailed: boolean;
-        includeSkipped: boolean;
-        includeSuccess: boolean;
-      }
-    >
+  const [jobFollowups, setJobFollowups] = useState<Record<string, FollowupConfig>>(
+    {}
+  );
+  const [jobPreviews, setJobPreviews] = useState<
+    Record<string, JobItemsResponse["items"] | null>
+  >({});
+  const [jobPreviewOpen, setJobPreviewOpen] = useState<Record<string, boolean>>(
+    {}
+  );
+  const [jobPreviewLoading, setJobPreviewLoading] = useState<
+    Record<string, boolean>
+  >({});
+  const [jobPreviewError, setJobPreviewError] = useState<
+    Record<string, string | null>
   >({});
   const [jobDeleteDownstream, setJobDeleteDownstream] = useState<
     Record<string, boolean>
@@ -334,7 +376,37 @@ export default function ProductJsonImportV2Page() {
       }
       return next;
     });
+    setJobPreviewOpen((prev) => {
+      const next = { ...prev };
+      for (const jobItem of nextJobs) {
+        if (next[jobItem.id] === undefined) {
+          next[jobItem.id] = false;
+        }
+      }
+      return next;
+    });
     return nextJobs;
+  }
+
+  async function fetchJobItemsPreview(jobId: string) {
+    setJobPreviewLoading((prev) => ({ ...prev, [jobId]: true }));
+    setJobPreviewError((prev) => ({ ...prev, [jobId]: null }));
+    try {
+      const res = await fetch(
+        `/api/product-json-import-v2/jobs/${jobId}/items?limit=10`
+      );
+      const data = await readJsonResponse<JobItemsResponse>(res);
+      if (!data.ok) {
+        throw new Error(data.error ?? "プレビュー取得に失敗しました");
+      }
+      setJobPreviews((prev) => ({ ...prev, [jobId]: data.items ?? [] }));
+    } catch (previewError) {
+      const message =
+        previewError instanceof Error ? previewError.message : "プレビュー取得に失敗しました";
+      setJobPreviewError((prev) => ({ ...prev, [jobId]: message }));
+    } finally {
+      setJobPreviewLoading((prev) => ({ ...prev, [jobId]: false }));
+    }
   }
 
   async function runBatch() {
@@ -719,10 +791,6 @@ export default function ProductJsonImportV2Page() {
 
   async function handleDeleteJob(target: Job) {
     const deleteDownstream = jobDeleteDownstream[target.id] ?? false;
-    const confirm = window.confirm(
-      `ジョブを削除しますか？\\njobId: ${target.id}\\n件数: ${target.totalCount}（success: ${target.successCount}, failed: ${target.failureCount}, skipped: ${target.skippedCount}）\\n※ items（CSVデータ）は削除されます。\\n※ downstream（埋め込み/画像ベクトル）削除: ${deleteDownstream ? "あり" : "なし"}`
-    );
-    if (!confirm) return;
     setDeletingJobs((prev) => ({ ...prev, [target.id]: true }));
     try {
       const res = await fetch(
@@ -771,10 +839,21 @@ export default function ProductJsonImportV2Page() {
     await fetchJobs();
   }
 
-  async function handleAddProcessing(target: Job) {
-    const followup = jobFollowups[target.id];
-    if (!followup) {
-      throw new Error("追加処理の設定がありません");
+  async function handleAddProcessing(
+    target: Job,
+    followupOverride?: FollowupConfig
+  ) {
+    const fallback: FollowupConfig = {
+      captions: true,
+      vectors: true,
+      captionImageInput: target.captionImageInput ?? "url",
+      includeFailed: false,
+      includeSkipped: true,
+      includeSuccess: true,
+    };
+    const followup = followupOverride ?? jobFollowups[target.id] ?? fallback;
+    if (!jobFollowups[target.id]) {
+      setJobFollowups((prev) => ({ ...prev, [target.id]: followup }));
     }
     if (!followup.captions && !followup.vectors) {
       throw new Error("追加処理（キャプション/ベクトル）を選択してください");
@@ -1135,7 +1214,7 @@ export default function ProductJsonImportV2Page() {
           <div className="mt-4 flex flex-wrap gap-3">
             <Button
               type="button"
-              onClick={() => setIsRunning(true)}
+              onClick={() => setStartDialogOpen(true)}
               disabled={isRunning || job.status === "completed"}
             >
               {isRunning ? "実行中..." : "処理開始"}
@@ -1164,6 +1243,43 @@ export default function ProductJsonImportV2Page() {
               1回実行
             </Button>
           </div>
+          <Dialog open={startDialogOpen} onOpenChange={setStartDialogOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>処理を開始しますか？</DialogTitle>
+                <DialogDescription>
+                  このジョブに対してrunを自動で繰り返します。停止するまで継続します。
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-2 text-sm">
+                <div>jobId: {job.id}</div>
+                <div>
+                  flags: text={String(job.doTextEmbedding)} captions=
+                  {String(job.doImageCaptions)} vectors={String(job.doImageVectors)}
+                </div>
+                <div>limit: {limit}</div>
+                <div>timeBudgetMs: {timeBudgetMs}</div>
+              </div>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => setStartDialogOpen(false)}
+                >
+                  キャンセル
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() => {
+                    setStartDialogOpen(false);
+                    setIsRunning(true);
+                  }}
+                >
+                  処理開始
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
           <div className="mt-2 text-xs text-muted-foreground">
             <div>処理開始: 自動でrunを繰り返します（進捗が止まるまで継続）。</div>
             <div>停止: 自動実行を止めます（処理中の行は次回再開時に続行）。</div>
@@ -1347,6 +1463,10 @@ export default function ProductJsonImportV2Page() {
                 includeSuccess: true,
               };
               const isDeleting = deletingJobs[jobItem.id] ?? false;
+              const isPreviewOpen = jobPreviewOpen[jobItem.id] ?? false;
+              const previewItems = jobPreviews[jobItem.id];
+              const previewError = jobPreviewError[jobItem.id];
+              const previewLoading = jobPreviewLoading[jobItem.id] ?? false;
               return (
                 <div
                   key={jobItem.id}
@@ -1443,10 +1563,49 @@ export default function ProductJsonImportV2Page() {
                     >
                       再処理
                     </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={async () => {
+                        const nextOpen = !isPreviewOpen;
+                        setJobPreviewOpen((prev) => ({ ...prev, [jobItem.id]: nextOpen }));
+                        if (nextOpen && !previewItems && !previewLoading) {
+                          await fetchJobItemsPreview(jobItem.id);
+                        }
+                      }}
+                    >
+                      {isPreviewOpen ? "プレビューを閉じる" : "プレビューを表示"}
+                    </Button>
                   </div>
                   <div className="mt-2 text-xs text-muted-foreground">
                     再処理は既存のフラグのまま、選んだステータスを pending に戻します。
                   </div>
+                  {isPreviewOpen && (
+                    <div className="mt-3 rounded-md border bg-background px-3 py-2 text-xs text-muted-foreground">
+                      <div className="font-medium text-foreground">登録データのプレビュー</div>
+                      {previewLoading && <div className="mt-2">読み込み中...</div>}
+                      {previewError && (
+                        <div className="mt-2 text-destructive">{previewError}</div>
+                      )}
+                      {!previewLoading && !previewError && (
+                        <div className="mt-2 space-y-1">
+                          {(previewItems ?? []).length === 0 && (
+                            <div>データがありません。</div>
+                          )}
+                          {(previewItems ?? []).map((item) => (
+                            <div key={`${jobItem.id}-${item.rowIndex}`}>
+                              row {item.rowIndex} / product_id {item.productId ?? "-"} / city_code{" "}
+                              {item.cityCode ?? "-"} / status {item.status}{" "}
+                              {item.error ? `/ error ${item.error}` : ""}
+                              {item.productJsonPreview
+                                ? ` / json: ${item.productJsonPreview}`
+                                : ""}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <div className="mt-3 flex flex-wrap items-center gap-3">
                     <div className="flex flex-wrap items-center gap-2 text-xs">
                       <span className="text-muted-foreground">追加処理:</span>
@@ -1557,21 +1716,12 @@ export default function ProductJsonImportV2Page() {
                     </div>
                     <Button
                       type="button"
-                      variant="secondary"
                       disabled={isDeleting}
                       onClick={async () => {
-                        try {
-                          await handleAddProcessing(jobItem);
-                        } catch (actionError) {
-                          setError(
-                            actionError instanceof Error
-                              ? actionError.message
-                              : "追加処理に失敗しました"
-                          );
-                        }
+                        setAddDialog({ open: true, job: jobItem, followup });
                       }}
                     >
-                      追加処理を開始
+                      このジョブを取り込みキューに設定
                     </Button>
                     <div className="text-xs text-muted-foreground">
                       追加処理はテキスト埋め込みをOFFにして画像系のみ実行します。
@@ -1597,15 +1747,7 @@ export default function ProductJsonImportV2Page() {
                       variant="destructive"
                       disabled={isDeleting}
                       onClick={async () => {
-                        try {
-                          await handleDeleteJob(jobItem);
-                        } catch (actionError) {
-                          setError(
-                            actionError instanceof Error
-                              ? actionError.message
-                              : "ジョブ削除に失敗しました"
-                          );
-                        }
+                        setDeleteDialog({ open: true, job: jobItem });
                       }}
                     >
                       {isDeleting ? "削除中..." : "削除"}
@@ -1628,6 +1770,133 @@ export default function ProductJsonImportV2Page() {
           {error}
         </Card>
       )}
+      <Dialog
+        open={addDialog.open}
+        onOpenChange={(open) =>
+          setAddDialog((prev) => ({ ...prev, open }))
+        }
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>このジョブを取り込みキューに設定しますか？</DialogTitle>
+            <DialogDescription>
+              画像キャプション/画像ベクトルの追加処理を実行します。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 text-sm">
+            <div>jobId: {addDialog.job?.id ?? "-"}</div>
+            <div>
+              対象:{" "}
+              {(() => {
+                const list: string[] = [];
+                if (addDialog.followup?.includeSuccess) list.push("success");
+                if (addDialog.followup?.includeSkipped) list.push("skipped");
+                if (addDialog.followup?.includeFailed) list.push("failed");
+                return list.length > 0 ? list.join(", ") : "-";
+              })()}
+            </div>
+            <div>
+              追加処理: captions={addDialog.followup?.captions ? "on" : "off"},
+              vectors={addDialog.followup?.vectors ? "on" : "off"}
+            </div>
+            <div>
+              captionInput:{" "}
+              {addDialog.followup?.captions
+                ? addDialog.followup?.captionImageInput ?? "-"
+                : "off"}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() =>
+                setAddDialog({ open: false, job: null, followup: null })
+              }
+            >
+              キャンセル
+            </Button>
+            <Button
+              type="button"
+              onClick={async () => {
+                if (!addDialog.job || !addDialog.followup) return;
+                try {
+                  await handleAddProcessing(addDialog.job, addDialog.followup);
+                  setAddDialog({ open: false, job: null, followup: null });
+                } catch (actionError) {
+                  setError(
+                    actionError instanceof Error
+                      ? actionError.message
+                      : "追加処理に失敗しました"
+                  );
+                }
+              }}
+            >
+              取り込みキューに設定
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={deleteDialog.open}
+        onOpenChange={(open) =>
+          setDeleteDialog((prev) => ({ ...prev, open }))
+        }
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>ジョブを削除しますか？</DialogTitle>
+            <DialogDescription>
+              items（CSVデータ）も削除されます。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 text-sm">
+            <div>jobId: {deleteDialog.job?.id ?? "-"}</div>
+            <div>
+              件数: {deleteDialog.job?.totalCount ?? 0}（success:
+              {deleteDialog.job?.successCount ?? 0} / failed:
+              {deleteDialog.job?.failureCount ?? 0} / skipped:
+              {deleteDialog.job?.skippedCount ?? 0}）
+            </div>
+            <div>
+              downstream削除:{" "}
+              {deleteDialog.job
+                ? jobDeleteDownstream[deleteDialog.job.id]
+                  ? "あり"
+                  : "なし"
+                : "-"}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setDeleteDialog({ open: false, job: null })}
+            >
+              キャンセル
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={async () => {
+                if (!deleteDialog.job) return;
+                try {
+                  await handleDeleteJob(deleteDialog.job);
+                  setDeleteDialog({ open: false, job: null });
+                } catch (actionError) {
+                  setError(
+                    actionError instanceof Error
+                      ? actionError.message
+                      : "ジョブ削除に失敗しました"
+                  );
+                }
+              }}
+            >
+              削除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

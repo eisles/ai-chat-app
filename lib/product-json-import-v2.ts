@@ -472,6 +472,39 @@ export async function listImportJobsV2(limit: number) {
   })) satisfies ImportJobSummaryV2[];
 }
 
+export async function getImportItemsPreviewV2(jobId: string, limit: number) {
+  const db = await ensureProductImportTablesV2();
+  const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+  const rows = (await db`
+    select
+      row_index,
+      city_code,
+      product_id,
+      status,
+      error,
+      substring(product_json, 1, 160) as product_json_preview
+    from public.product_import_items_v2
+    where job_id = ${jobId}
+    order by row_index
+    limit ${safeLimit}
+  `) as Array<{
+    row_index: number;
+    city_code: string | null;
+    product_id: string | null;
+    status: string;
+    error: string | null;
+    product_json_preview: string | null;
+  }>;
+  return rows.map((row) => ({
+    rowIndex: row.row_index,
+    cityCode: row.city_code,
+    productId: row.product_id,
+    status: row.status,
+    error: row.error,
+    productJsonPreview: row.product_json_preview,
+  }));
+}
+
 export async function deleteImportJobV2(jobId: string): Promise<boolean> {
   const db = await ensureProductImportTablesV2();
   const rows = (await db`
