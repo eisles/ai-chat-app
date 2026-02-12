@@ -867,6 +867,17 @@ export default function ProductJsonImportV2Page() {
               />
               <span>画像ベクトル</span>
             </label>
+            <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+              <div className="font-medium text-foreground">
+                Vercelで進まない場合の推奨手順
+              </div>
+              <div className="mt-1 space-y-1">
+                <div>1. テキスト埋め込みだけONでジョブ作成</div>
+                <div>2. 完了後、同じCSVで「画像キャプション」だけON</div>
+                <div>3. 完了後、同じCSVで「画像ベクトル」だけON</div>
+              </div>
+              <div className="mt-2">各ステップは別ジョブになります。</div>
+            </div>
           </div>
 
           <Button type="submit" disabled={isUploading}>

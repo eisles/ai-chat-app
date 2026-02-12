@@ -29,6 +29,7 @@ import {
 } from "@/lib/vectorize-product-images";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const CAPTION_MODEL = process.env.OPENAI_CAPTION_MODEL ?? "gpt-4o";
