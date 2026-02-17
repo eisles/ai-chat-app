@@ -3,7 +3,28 @@
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import Image from "next/image";
 import { useState } from "react";
+
+// metadata.rawから商品情報を取得
+function extractProductInfo(metadata: Record<string, unknown> | null): {
+  name: string | null;
+  image: string | null;
+} {
+  if (!metadata) {
+    return { name: null, image: null };
+  }
+
+  const raw = metadata.raw as Record<string, unknown> | undefined;
+  if (!raw) {
+    return { name: null, image: null };
+  }
+
+  return {
+    name: typeof raw.name === "string" ? raw.name : null,
+    image: typeof raw.image === "string" ? raw.image : null,
+  };
+}
 
 type ResultRow = {
   id: string;
@@ -11,6 +32,8 @@ type ResultRow = {
   product_id: string | null;
   image_url: string;
   distance: number;
+  metadata?: Record<string, unknown> | null;
+  amount?: number | null;
 };
 
 type ApiResult = {
@@ -24,6 +47,20 @@ type ApiResult = {
   error?: string;
 };
 
+function buildProductUrl(
+  productId: string | null,
+  cityCode: string | null,
+  imageUrl: string,
+): string {
+  if (productId && cityCode) {
+    return `https://www.furusato-tax.jp/product/detail/${cityCode}/${productId}`;
+  }
+  if (productId) {
+    return `https://www.furusato-tax.jp/search?q=${productId}`;
+  }
+  return imageUrl;
+}
+
 export default function ProductImagesVectorizeSearchPage() {
   const [imageUrl, setImageUrl] = useState(
     "https://img.furusato-tax.jp/cdn-cgi/image/width=800,height=498,fit=pad,format=auto/img/unresized/x/product/details/20250519/sd1_5c4f2dc77bd866d82a580e200a1e13fd8e229a84.jpg",
@@ -31,6 +68,9 @@ export default function ProductImagesVectorizeSearchPage() {
   const [limit, setLimit] = useState("24");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [result, setResult] = useState<ApiResult | null>(null);
+  const [displayMode, setDisplayMode] = useState<"debug" | "product">(
+    "product",
+  );
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -137,28 +177,141 @@ export default function ProductImagesVectorizeSearchPage() {
               </div>
 
               {result.results && result.results.length > 0 ? (
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {result.results.map((row) => (
-                    <div
-                      className="rounded-lg border bg-background/70 p-3"
-                      key={row.id}
-                    >
-                      <div className="aspect-square overflow-hidden rounded-md bg-muted/50">
-                        <img
-                          alt="result"
-                          className="h-full w-full object-cover"
-                          loading="lazy"
-                          src={row.image_url}
-                        />
-                      </div>
-                      <div className="mt-2 space-y-1 text-xs text-muted-foreground">
-                        <div>distance: {row.distance.toFixed(6)}</div>
-                        <div>city_code: {row.city_code ?? "-"}</div>
-                        <div>product_id: {row.product_id ?? "-"}</div>
-                        <div className="break-all">id: {row.id}</div>
-                      </div>
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium">表示モード:</span>
+                    <div className="flex rounded-lg border p-1">
+                      <button
+                        type="button"
+                        onClick={() => setDisplayMode("debug")}
+                        className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
+                          displayMode === "debug"
+                            ? "bg-primary text-primary-foreground"
+                            : "text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        デバッグ表示
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDisplayMode("product")}
+                        className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
+                          displayMode === "product"
+                            ? "bg-primary text-primary-foreground"
+                            : "text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        商品カード表示
+                      </button>
                     </div>
-                  ))}
+                  </div>
+
+                  {displayMode === "debug" ? (
+                    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                      {result.results.map((row) => (
+                        <div
+                          className="rounded-lg border bg-background/70 p-3"
+                          key={row.id}
+                        >
+                          <div className="aspect-square overflow-hidden rounded-md bg-muted/50">
+                            <img
+                              alt="result"
+                              className="h-full w-full object-cover"
+                              loading="lazy"
+                              src={row.image_url}
+                            />
+                          </div>
+                          <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+                            <div>distance: {row.distance.toFixed(6)}</div>
+                            <div>city_code: {row.city_code ?? "-"}</div>
+                            <div>product_id: {row.product_id ?? "-"}</div>
+                            <div className="break-all">id: {row.id}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                      {result.results.map((row) => {
+                        const { name, image } = extractProductInfo(
+                          row.metadata ?? null,
+                        );
+                        const displayName = row.product_id
+                          ? name ?? `商品ID: ${row.product_id}`
+                          : name ?? `ID: ${row.id}`;
+                        const productUrl = buildProductUrl(
+                          row.product_id,
+                          row.city_code,
+                          row.image_url,
+                        );
+                        const displayImage = image ?? row.image_url;
+
+                        return (
+                          <div
+                            key={row.id}
+                            className="overflow-hidden rounded-lg border bg-background/70 shadow-sm transition-shadow hover:shadow-md"
+                          >
+                            {/* 商品画像 */}
+                            <div className="relative aspect-[4/3] bg-muted">
+                              {displayImage ? (
+                                <Image
+                                  src={displayImage}
+                                  alt={displayName}
+                                  fill
+                                  className="object-cover"
+                                  sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+                                  onError={(event) => {
+                                    const target = event.currentTarget;
+                                    target.style.display = "none";
+                                    const fallback =
+                                      target.parentElement?.querySelector(
+                                        ".image-fallback",
+                                      );
+                                    if (fallback) {
+                                      (fallback as HTMLElement).style.display = "flex";
+                                    }
+                                  }}
+                                />
+                              ) : null}
+                              <div
+                                className={`image-fallback absolute inset-0 items-center justify-center bg-muted text-4xl ${
+                                  displayImage ? "hidden" : "flex"
+                                }`}
+                              >
+                                📦
+                              </div>
+                            </div>
+
+                            {/* 商品情報 */}
+                            <div className="p-3">
+                              <a
+                                href={productUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="line-clamp-2 text-sm font-medium hover:text-primary hover:underline"
+                                title={displayName}
+                              >
+                                {displayName}
+                                <span className="ml-1 inline-block text-xs text-muted-foreground">
+                                  ↗
+                                </span>
+                              </a>
+
+                              <div className="mt-2 text-lg font-bold text-primary">
+                                {row.amount != null
+                                  ? `${row.amount.toLocaleString()}円`
+                                  : "金額未設定"}
+                              </div>
+
+                              <div className="mt-1 text-xs text-muted-foreground">
+                                距離: {row.distance.toFixed(4)}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="rounded-md bg-muted/50 px-3 py-2 text-sm text-muted-foreground">

@@ -9,6 +9,11 @@ import {
   LLMProviderError,
 } from "@/lib/llm-providers";
 import { getDb } from "@/lib/neon";
+import {
+  extractCategoriesFromMetadata,
+  getCategoryScoreAdjustment,
+  inferCategoryFromKeyword,
+} from "@/lib/category-utils";
 import { randomUUID } from "crypto";
 
 export const runtime = "nodejs";
@@ -34,6 +39,12 @@ class ApiError extends Error {
 type SearchOptions = {
   topK: number;
   threshold: number;
+  useAmountFilter: boolean;
+};
+
+type AmountRange = {
+  min?: number | null;
+  max?: number | null;
 };
 
 type ImageMatch = {
@@ -45,6 +56,8 @@ type ImageMatch = {
   distance: number;
   imageSimilarity: number;
   imageScore: number;
+  metadata: Record<string, unknown> | null;
+  amount: number | null;
 };
 
 type CombinedMatch = {
@@ -55,18 +68,20 @@ type CombinedMatch = {
   text?: string;
   metadata?: Record<string, unknown> | null;
   imageUrl?: string;
+  amount?: number | null;
   textScore: number;
   textSimilarity: number;
   imageScore: number;
   imageSimilarity: number;
   imageDistance: number | null;
   textDistance: number | null;
+  categoryAdjustment: number;
   score: number;
 };
 
 function parseSearchOptions(value: FormDataEntryValue | null): SearchOptions {
   if (!value) {
-    return { topK: DEFAULT_TOP_K, threshold: DEFAULT_THRESHOLD };
+    return { topK: DEFAULT_TOP_K, threshold: DEFAULT_THRESHOLD, useAmountFilter: true };
   }
 
   if (typeof value !== "string") {
@@ -84,7 +99,11 @@ function parseSearchOptions(value: FormDataEntryValue | null): SearchOptions {
     throw new ApiError("Options must be an object", 400);
   }
 
-  const options = parsed as { top_k?: unknown; threshold?: unknown };
+  const options = parsed as {
+    top_k?: unknown;
+    threshold?: unknown;
+    use_amount_filter?: unknown;
+  };
   const topK =
     typeof options.top_k === "number" && Number.isFinite(options.top_k)
       ? Math.floor(options.top_k)
@@ -93,6 +112,10 @@ function parseSearchOptions(value: FormDataEntryValue | null): SearchOptions {
     typeof options.threshold === "number" && Number.isFinite(options.threshold)
       ? options.threshold
       : DEFAULT_THRESHOLD;
+  const useAmountFilter =
+    typeof options.use_amount_filter === "boolean"
+      ? options.use_amount_filter
+      : true;
 
   if (topK <= 0) {
     throw new ApiError("top_k must be positive", 400);
@@ -101,7 +124,7 @@ function parseSearchOptions(value: FormDataEntryValue | null): SearchOptions {
     throw new ApiError("threshold must be between 0 and 1", 400);
   }
 
-  return { topK, threshold };
+  return { topK, threshold, useAmountFilter };
 }
 
 function isSupportedImageType(contentType: string | undefined) {
@@ -231,6 +254,87 @@ function rankFusionScores<T>(items: T[]): Map<T, number> {
   return new Map(items.map((item, index) => [item, 1 / (index + 1)]));
 }
 
+function normalizeNumberText(value: string): string {
+  return value
+    .replace(/[０-９]/g, (ch) => String(ch.charCodeAt(0) - 0xfee0))
+    .replaceAll("，", ",")
+    .replaceAll("．", ".");
+}
+
+function parseYenAmount(rawNumber: string, unit: string | undefined): number | null {
+  const normalized = normalizeNumberText(rawNumber).replaceAll(",", "").trim();
+  if (!normalized) {
+    return null;
+  }
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  const multiplier = unit === "万" ? 10000 : 1;
+  return Math.round(parsed * multiplier);
+}
+
+function extractAmountRangeFromDescription(description: string): AmountRange | null {
+  const text = normalizeNumberText(description);
+  const numberPattern = "([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*(万)?\\s*円?";
+
+  const explicitRange = new RegExp(
+    `${numberPattern}\\s*(?:〜|~|\\-|－|—|ー|から)\\s*${numberPattern}`
+  );
+  const rangeMatch = text.match(explicitRange);
+  if (rangeMatch) {
+    const first = parseYenAmount(rangeMatch[1] ?? "", rangeMatch[2] ?? undefined);
+    const second = parseYenAmount(rangeMatch[3] ?? "", rangeMatch[4] ?? undefined);
+    if (first !== null && second !== null) {
+      return { min: Math.min(first, second), max: Math.max(first, second) };
+    }
+  }
+
+  const belowRegex = new RegExp(`${numberPattern}\\s*(?:以下|未満|以内|まで)`);
+  const belowMatch = text.match(belowRegex);
+  if (belowMatch) {
+    const value = parseYenAmount(belowMatch[1] ?? "", belowMatch[2] ?? undefined);
+    if (value !== null) {
+      return { max: value };
+    }
+  }
+
+  const aboveRegex = new RegExp(`${numberPattern}\\s*(?:以上|超|より高い|より高額)`);
+  const aboveMatch = text.match(aboveRegex);
+  if (aboveMatch) {
+    const value = parseYenAmount(aboveMatch[1] ?? "", aboveMatch[2] ?? undefined);
+    if (value !== null) {
+      return { min: value };
+    }
+  }
+
+  const aroundRegex = new RegExp(`${numberPattern}\\s*(?:くらい|前後|程度|ほど|台)`);
+  const aroundMatch = text.match(aroundRegex);
+  if (aroundMatch) {
+    const value = parseYenAmount(aroundMatch[1] ?? "", aroundMatch[2] ?? undefined);
+    if (value !== null) {
+      return {
+        min: Math.max(0, Math.round(value * 0.85)),
+        max: Math.round(value * 1.15),
+      };
+    }
+  }
+
+  const exactRegex = new RegExp(numberPattern);
+  const exactMatch = text.match(exactRegex);
+  if (exactMatch) {
+    const value = parseYenAmount(exactMatch[1] ?? "", exactMatch[2] ?? undefined);
+    if (value !== null) {
+      return {
+        min: Math.max(0, Math.round(value * 0.9)),
+        max: Math.round(value * 1.1),
+      };
+    }
+  }
+
+  return null;
+}
+
 async function generateCaption(dataUrl: string, model: string) {
   const modelConfig = getModelById(model);
   if (modelConfig && !modelConfig.supportsVision) {
@@ -322,11 +426,18 @@ export async function POST(req: Request) {
       ? await fileToDataUrl(file)
       : await imageUrlToDataUrl(imageUrl!);
     const description = await generateCaption(dataUrl, model);
+    const amountRange = extractAmountRangeFromDescription(description);
+    const amountFilterApplied = options.useAmountFilter && amountRange !== null;
+    const inferredCategory = inferCategoryFromKeyword(description);
+    const amountMin = amountFilterApplied ? amountRange?.min ?? null : null;
+    const amountMax = amountFilterApplied ? amountRange?.max ?? null : null;
     const embedding = await generateTextEmbedding(description);
     const matches = await searchTextEmbeddings({
       embedding: embedding.vector,
       topK: options.topK,
       threshold: options.threshold,
+      amountMin,
+      amountMax,
     });
     const imageEmbedding = await generateImageEmbedding({
       file: file instanceof File ? file : undefined,
@@ -337,14 +448,28 @@ export async function POST(req: Request) {
     await db`create extension if not exists vector`;
     const imageRows = (await db`
       select
-        id,
-        city_code,
-        product_id,
-        slide_index,
-        image_url,
-        embedding <-> ${imageEmbeddingLiteral}::vector as distance
-      from public.product_images_vectorize
-      order by embedding <-> ${imageEmbeddingLiteral}::vector
+        v.id,
+        v.city_code,
+        v.product_id,
+        v.slide_index,
+        v.image_url,
+        v.embedding <-> ${imageEmbeddingLiteral}::vector as distance,
+        t.metadata,
+        t.amount
+      from public.product_images_vectorize v
+      left join lateral (
+        select metadata, amount
+        from public.product_text_embeddings
+        where product_id = v.product_id
+          and text_source = 'product_json'
+          and (${amountMin}::integer is null or amount >= ${amountMin})
+          and (${amountMax}::integer is null or amount <= ${amountMax})
+        order by updated_at desc nulls last
+        limit 1
+      ) t on true
+      where (${amountMin}::integer is null or t.amount >= ${amountMin})
+        and (${amountMax}::integer is null or t.amount <= ${amountMax})
+      order by v.embedding <-> ${imageEmbeddingLiteral}::vector
       limit ${options.topK}
     `) as Array<{
       id: string;
@@ -353,6 +478,8 @@ export async function POST(req: Request) {
       slide_index: number | null;
       image_url: string;
       distance: number;
+      metadata: Record<string, unknown> | null;
+      amount: number | null;
     }>;
     const imageMatches: ImageMatch[] = imageRows.map((row) => ({
       id: row.id,
@@ -363,6 +490,8 @@ export async function POST(req: Request) {
       distance: Number(row.distance),
       imageSimilarity: 1 / (1 + Number(row.distance)),
       imageScore: 1 / (1 + Number(row.distance)),
+      metadata: row.metadata ?? null,
+      amount: row.amount ?? null,
     }));
     const textScoreMap = rankFusionScores(matches);
     const imageScoreMap = rankFusionScores(imageMatches);
@@ -381,10 +510,12 @@ export async function POST(req: Request) {
         textScore,
         textSimilarity: item.score,
         textDistance: 1 - item.score,
+        amount: item.amount ?? null,
         imageScore: 0,
         imageSimilarity: 0,
         imageDistance: null,
-        score: TEXT_WEIGHT * textScore,
+        categoryAdjustment: 0,
+        score: 0,
       });
     }
 
@@ -398,23 +529,43 @@ export async function POST(req: Request) {
         cityCode: item.cityCode ?? null,
         slideIndex: item.slideIndex ?? null,
         text: existing?.text,
-        metadata: existing?.metadata,
+        metadata: existing?.metadata ?? item.metadata ?? null,
         imageUrl: item.imageUrl,
+        amount: existing?.amount ?? item.amount ?? null,
         textScore: existing?.textScore ?? 0,
         textSimilarity: existing?.textSimilarity ?? 0,
         textDistance: existing?.textDistance ?? null,
         imageScore,
         imageSimilarity: item.imageSimilarity,
         imageDistance: item.distance,
+        categoryAdjustment: 0,
         score: 0,
       };
-      merged.score = TEXT_WEIGHT * merged.textScore + IMAGE_WEIGHT * merged.imageScore;
+      const categories = extractCategoriesFromMetadata(merged.metadata ?? null);
+      merged.categoryAdjustment = getCategoryScoreAdjustment(
+        categories,
+        inferredCategory
+      );
+      merged.score =
+        TEXT_WEIGHT * merged.textScore +
+        IMAGE_WEIGHT * merged.imageScore +
+        merged.categoryAdjustment;
       combinedMap.set(key, merged);
     }
 
-    const combinedMatches = [...combinedMap.values()].sort(
-      (a, b) => b.score - a.score
-    );
+    for (const item of combinedMap.values()) {
+      if (item.score !== 0) {
+        continue;
+      }
+      const categories = extractCategoriesFromMetadata(item.metadata ?? null);
+      item.categoryAdjustment = getCategoryScoreAdjustment(
+        categories,
+        inferredCategory
+      );
+      item.score = TEXT_WEIGHT * item.textScore + item.categoryAdjustment;
+    }
+
+    const combinedMatches = [...combinedMap.values()].sort((a, b) => b.score - a.score);
     const elapsedMs = Date.now() - startedAt;
 
     console.info("image-search", {
@@ -427,6 +578,9 @@ export async function POST(req: Request) {
       ok: true,
       trackingId,
       description,
+      inferredCategory,
+      amountRange,
+      amountFilterApplied,
       elapsedMs,
       matches,
       imageMatches,

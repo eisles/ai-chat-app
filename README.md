@@ -41,3 +41,10 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 2. Add the string to your environment: in `.env.local` set `NEON_DATABASE_URL="postgresql://user:password@host/db?sslmode=require"`. `DATABASE_URL` is also accepted.
 3. Start the dev server (`npm run dev`) and verify the connection at [`/api/db-test`](http://localhost:3000/api/db-test). You should see JSON with the current database time.
 4. For production (Vercel, etc.), set the same `NEON_DATABASE_URL` as a project environment variable.
+
+## Vectorize API endpoint
+
+画像ベクトル化APIのエンドポイントは環境変数で切り替えできます。
+
+- `VECTORIZE_ENDPOINT`: 例 `http://localhost:8080/vectorize`
+- 未設定の場合は `https://convertvectorapi.onrender.com/vectorize` を使用します。

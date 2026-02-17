@@ -1,4 +1,5 @@
 import { getDb } from "@/lib/neon";
+import { ensureProductTextEmbeddingsInitialized } from "@/lib/image-text-search";
 
 type SearchPayload = {
   imageUrl?: string;
@@ -96,19 +97,30 @@ export async function POST(req: Request) {
       await embedWithVectorizeApi(imageUrl);
     const embeddingLiteral = `[${vector.join(",")}]`;
 
+    await ensureProductTextEmbeddingsInitialized();
     const db = getDb();
     await db`create extension if not exists vector`;
 
     const rows = (await db`
       select
-        id,
-        city_code,
-        product_id,
-        slide_index,
-        image_url,
-        embedding <-> ${embeddingLiteral}::vector as distance
-      from public.product_images_vectorize
-      order by embedding <-> ${embeddingLiteral}::vector
+        v.id,
+        v.city_code,
+        v.product_id,
+        v.slide_index,
+        v.image_url,
+        v.embedding <-> ${embeddingLiteral}::vector as distance,
+        t.metadata,
+        t.amount
+      from public.product_images_vectorize v
+      left join lateral (
+        select metadata, amount
+        from public.product_text_embeddings
+        where product_id = v.product_id
+          and text_source = 'product_json'
+        order by updated_at desc nulls last
+        limit 1
+      ) t on true
+      order by v.embedding <-> ${embeddingLiteral}::vector
       limit ${safeLimit}
     `) as Array<{
       id: string;
@@ -117,6 +129,8 @@ export async function POST(req: Request) {
       slide_index: number | null;
       image_url: string;
       distance: number;
+      metadata: Record<string, unknown> | null;
+      amount: number | null;
     }>;
 
     return Response.json({

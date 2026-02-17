@@ -16,7 +16,9 @@ type SlideVector = {
   slideIndex: number;
 };
 
-const VECTORIZE_ENDPOINT = "https://convertvectorapi.onrender.com/vectorize";
+const DEFAULT_VECTORIZE_ENDPOINT = "https://convertvectorapi.onrender.com/vectorize";
+const VECTORIZE_ENDPOINT =
+  process.env.VECTORIZE_ENDPOINT ?? DEFAULT_VECTORIZE_ENDPOINT;
 const TARGET_DIM = 512;
 
 function generateUuidV7() {
