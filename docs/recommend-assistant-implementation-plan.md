@@ -360,3 +360,48 @@ describe("recommend conversation api", () => {
 - 結果0件の体験悪化  
 対策: 条件緩和（threshold引き下げ、delivery条件をソフト化）を次フェーズで追加する。
 
+## 8. 5ステップ質問導線（追加計画）
+
+### 5ステップ質問
+
+1. 用途（自宅用 / 贈り物 など）
+2. 予算（〜5,000円 / 5,001〜10,000円 / ...）
+3. カテゴリ（肉 / 魚介 / 果物 / ...）
+4. 配送希望（冷凍 / 冷蔵 / 常温 / 日時指定 / こだわらない）
+5. 追加条件（アレルゲン・地域指定・避けたい条件、または特になし）
+
+### 実装方針
+
+- 各ステップは `session.askedKeys` で管理し、未完了の最初のステップを次質問として返す。
+- ユーザー発話で既に値が抽出できたステップは自動で完了扱いにする。
+- ステップ4/5は「こだわらない」「特になし」入力でスキップ完了に進める。
+- API は `nextQuestionKey` と `quickReplies` を返し、UI は自由入力と選択肢を併用できるようにする。
+
+### 変更対象
+
+- `lib/recommend-conversation/session.ts`
+- `app/api/recommend/conversation/route.ts`
+- `app/recommend-assistant/page.tsx`
+- `tests/api/recommend-conversation.test.ts`
+
+## 9. 既存データからのカテゴリ抽出（追加計画）
+
+### 背景
+
+- 返礼品には「品物」だけでなく「温泉・体験」系も含まれる。
+- 固定カテゴリだけでは候補が偏るため、既存データの `metadata` からカテゴリを抽出して選択肢に使う。
+
+### 実装方針
+
+- `product_text_embeddings.metadata.raw` からカテゴリ候補を集計する。
+- 優先抽出キー:
+  - `raw.categories[].category1_name/category2_name/category3_name`
+  - `raw.category`, `raw.category_name`, `raw.genre`, `raw.genre_name`, `raw.product_type`, `raw.item_type`
+- 出現頻度でソートしたカテゴリを `quickReplies` に反映する。
+- DB取得に失敗した場合は既存の固定カテゴリにフォールバックする。
+
+### 変更対象
+
+- `lib/recommend/category-candidates.ts`（カテゴリ集計 + キャッシュ）
+- `app/api/recommend/conversation/route.ts`（カテゴリ質問時の `quickReplies` を動的化）
+- `tests/api/recommend-conversation.test.ts`（カテゴリ候補レスポンスのテスト）

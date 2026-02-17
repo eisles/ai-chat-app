@@ -31,6 +31,8 @@ const navLinks = [
   { href: "/product-json-import", label: "商品JSON取り込み" },
   { href: "/product-json-import-v2", label: "商品JSON取り込み(v2)" },
   { href: "/chat-recommend", label: "チャット履歴レコメンド" },
+  { href: "/recommend-assistant", label: "対話型レコメンド" },
+  { href: "/recommend-assistant-settings", label: "対話型レコメンド設定" },
   { href: "/agent-recommend", label: "エージェント質問レコメンド" },
   { href: "/text-info-list", label: "文字情報一覧" },
   { href: "/product-images/list", label: "ベクトル一覧" },

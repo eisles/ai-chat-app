@@ -134,6 +134,8 @@ describe("POST /api/image-search", () => {
       embedding: [0.1, 0.2],
       topK: 3,
       threshold: 0.5,
+      amountMin: null,
+      amountMax: null,
     });
   });
 });
