@@ -97,7 +97,9 @@ type Message = {
   text: string;
 };
 
-const SIMILAR_IMAGE_RESULT_LIMIT = 20;
+const DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT = 20;
+const MIN_SIMILAR_IMAGE_RESULT_LIMIT = 1;
+const MAX_SIMILAR_IMAGE_RESULT_LIMIT = 100;
 
 const FIELD_LABELS: Record<string, string> = {
   purpose: "用途",
@@ -209,6 +211,16 @@ function buildProductUrlForVectorResult(
   return fallbackUrl;
 }
 
+function parseSimilarImageLimit(input: string): number {
+  const parsed = Number(input);
+  if (!Number.isFinite(parsed)) return DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT;
+  const intValue = Math.floor(parsed);
+  return Math.max(
+    MIN_SIMILAR_IMAGE_RESULT_LIMIT,
+    Math.min(intValue, MAX_SIMILAR_IMAGE_RESULT_LIMIT)
+  );
+}
+
 function createInitialSession(): ConversationSession {
   return {
     slots: {},
@@ -250,6 +262,12 @@ export default function RecommendAssistantPage() {
   const [similarImageError, setSimilarImageError] = useState<string | null>(null);
   const [similarImageEmbeddingMs, setSimilarImageEmbeddingMs] = useState<number | null>(null);
   const [similarImageModel, setSimilarImageModel] = useState<string | null>(null);
+  const [similarImageLimit, setSimilarImageLimit] = useState(
+    String(DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT)
+  );
+  const [similarImageResultLimit, setSimilarImageResultLimit] = useState(
+    DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT
+  );
   const [similarImageSearchRequestId, setSimilarImageSearchRequestId] = useState(0);
   const similarImageResultAnchorRef = useRef<HTMLDivElement | null>(null);
 
@@ -401,11 +419,13 @@ export default function RecommendAssistantPage() {
     sourceProductId: string
   ) {
     if (!imageUrl.trim()) return;
+    const safeLimit = parseSimilarImageLimit(similarImageLimit);
 
     setSimilarImageLoading(true);
     setSimilarImageError(null);
     setSimilarImageSourceUrl(imageUrl);
     setSimilarImageSourceProductId(sourceProductId);
+    setSimilarImageResultLimit(safeLimit);
     setSimilarImageResults([]);
     setSimilarImageEmbeddingMs(null);
     setSimilarImageModel(null);
@@ -417,7 +437,7 @@ export default function RecommendAssistantPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           imageUrl,
-          limit: SIMILAR_IMAGE_RESULT_LIMIT,
+          limit: safeLimit,
         }),
       });
 
@@ -486,7 +506,7 @@ export default function RecommendAssistantPage() {
           <li>カテゴリフィルタ: 商品カテゴリに入力カテゴリが含まれるものを優先</li>
           <li>配送フィルタ: 指定された配送条件をすべて満たす商品のみ表示</li>
           <li>結果カードの理由表示: カテゴリ一致 / 予算一致 / 配送条件一致</li>
-          <li>商品カードから画像ベクトル類似検索を実行し、下部に20件表示</li>
+          <li>商品カードから画像ベクトル類似検索を実行（件数は指定可能、初期値20）</li>
         </ul>
       </Card>
 
@@ -543,7 +563,7 @@ export default function RecommendAssistantPage() {
             </div>
           )}
 
-          <div className="grid gap-2 sm:grid-cols-2">
+          <div className="grid gap-2 sm:grid-cols-3">
             <div className="space-y-1">
               <div className="text-xs text-muted-foreground">検索件数 (`topK`)</div>
               <Input
@@ -564,6 +584,18 @@ export default function RecommendAssistantPage() {
                 value={threshold}
                 onChange={(event) => setThreshold(event.target.value)}
                 placeholder="0.35"
+              />
+            </div>
+            <div className="space-y-1">
+              <div className="text-xs text-muted-foreground">画像類似件数 (`limit`)</div>
+              <Input
+                type="number"
+                min={MIN_SIMILAR_IMAGE_RESULT_LIMIT}
+                max={MAX_SIMILAR_IMAGE_RESULT_LIMIT}
+                step={1}
+                value={similarImageLimit}
+                onChange={(event) => setSimilarImageLimit(event.target.value)}
+                placeholder={String(DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT)}
               />
             </div>
           </div>
@@ -777,7 +809,7 @@ export default function RecommendAssistantPage() {
             </div>
             <div className="text-xs text-muted-foreground">
               参照商品: {similarImageSourceProductId ?? "-"} / 表示件数:{" "}
-              {SIMILAR_IMAGE_RESULT_LIMIT}件
+              {similarImageResultLimit}件
             </div>
             <div className="break-all text-xs text-muted-foreground">
               参照画像: {similarImageSourceUrl}
