@@ -212,7 +212,9 @@ function buildProductUrlForVectorResult(
 }
 
 function parseSimilarImageLimit(input: string): number {
-  const parsed = Number(input);
+  const trimmed = input.trim();
+  if (!trimmed) return DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT;
+  const parsed = Number(trimmed);
   if (!Number.isFinite(parsed)) return DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT;
   const intValue = Math.floor(parsed);
   return Math.max(
@@ -425,6 +427,7 @@ export default function RecommendAssistantPage() {
     setSimilarImageError(null);
     setSimilarImageSourceUrl(imageUrl);
     setSimilarImageSourceProductId(sourceProductId);
+    setSimilarImageLimit(String(safeLimit));
     setSimilarImageResultLimit(safeLimit);
     setSimilarImageResults([]);
     setSimilarImageEmbeddingMs(null);
@@ -803,48 +806,48 @@ export default function RecommendAssistantPage() {
       {(similarImageSourceUrl || similarImageLoading) && (
         <div ref={similarImageResultAnchorRef}>
           <Card className="border bg-card/60 p-4 shadow-sm sm:p-6">
-          <div className="mb-3 space-y-1">
-            <div className="text-sm font-medium text-foreground">
-              画像ベクトル類似検索結果
-            </div>
-            <div className="text-xs text-muted-foreground">
-              参照商品: {similarImageSourceProductId ?? "-"} / 表示件数:{" "}
-              {similarImageResultLimit}件
-            </div>
-            <div className="break-all text-xs text-muted-foreground">
-              参照画像: {similarImageSourceUrl}
-            </div>
-            {similarImageSourceUrl && (
-              <div className="relative mt-2 aspect-[4/3] w-full max-w-sm overflow-hidden rounded-md border bg-muted">
-                <Image
-                  src={similarImageSourceUrl}
-                  alt="参照画像"
-                  fill
-                  className="object-cover"
-                  sizes="(max-width: 640px) 100vw, 400px"
-                  onError={(event) => {
-                    const target = event.currentTarget;
-                    target.style.display = "none";
-                    const fallback = target.parentElement?.querySelector(".source-image-fallback");
-                    if (fallback) {
-                      (fallback as HTMLElement).style.display = "flex";
-                    }
-                  }}
-                />
-                <div className="source-image-fallback absolute inset-0 hidden items-center justify-center text-sm text-muted-foreground">
-                  画像を表示できません
-                </div>
+            <div className="mb-3 space-y-1">
+              <div className="text-sm font-medium text-foreground">
+                画像ベクトル類似検索結果
               </div>
-            )}
-            {similarImageModel && (
               <div className="text-xs text-muted-foreground">
-                model: {similarImageModel}
-                {similarImageEmbeddingMs !== null
-                  ? ` / vectorization: ${similarImageEmbeddingMs}ms`
-                  : ""}
+                参照商品: {similarImageSourceProductId ?? "-"} / 表示件数:{" "}
+                {similarImageResultLimit}件
               </div>
-            )}
-          </div>
+              <div className="break-all text-xs text-muted-foreground">
+                参照画像: {similarImageSourceUrl}
+              </div>
+              {similarImageSourceUrl && (
+                <div className="relative mt-2 aspect-[4/3] w-full max-w-sm overflow-hidden rounded-md border bg-muted">
+                  <Image
+                    src={similarImageSourceUrl}
+                    alt="参照画像"
+                    fill
+                    className="object-cover"
+                    sizes="(max-width: 640px) 100vw, 400px"
+                    onError={(event) => {
+                      const target = event.currentTarget;
+                      target.style.display = "none";
+                      const fallback = target.parentElement?.querySelector(".source-image-fallback");
+                      if (fallback) {
+                        (fallback as HTMLElement).style.display = "flex";
+                      }
+                    }}
+                  />
+                  <div className="source-image-fallback absolute inset-0 hidden items-center justify-center text-sm text-muted-foreground">
+                    画像を表示できません
+                  </div>
+                </div>
+              )}
+              {similarImageModel && (
+                <div className="text-xs text-muted-foreground">
+                  model: {similarImageModel}
+                  {similarImageEmbeddingMs !== null
+                    ? ` / vectorization: ${similarImageEmbeddingMs}ms`
+                    : ""}
+                </div>
+              )}
+            </div>
 
           {similarImageLoading && (
             <div className="rounded-md bg-muted/60 px-3 py-2 text-sm text-muted-foreground">
