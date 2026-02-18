@@ -882,6 +882,10 @@ export default function RecommendAssistantPage() {
                   row.city_code,
                   row.image_url
                 );
+                const hasDifferentSearchImage =
+                  sourceImageUrl.length > 0 &&
+                  displayImage &&
+                  sourceImageUrl !== displayImage;
                 const isSearchingThisImage =
                   similarImageLoading &&
                   sourceImageUrl.length > 0 &&
@@ -941,6 +945,35 @@ export default function RecommendAssistantPage() {
                       <div className="mt-1 text-xs text-muted-foreground">
                         productId: {row.product_id ?? "-"}
                       </div>
+                      {hasDifferentSearchImage && (
+                        <div className="mt-2 flex items-center gap-2 rounded-md border bg-muted/40 p-2">
+                          <div className="relative h-12 w-12 flex-none overflow-hidden rounded bg-muted">
+                            <Image
+                              src={sourceImageUrl}
+                              alt="検索対象画像"
+                              fill
+                              className="object-cover"
+                              sizes="48px"
+                              onError={(event) => {
+                                const target = event.currentTarget;
+                                target.style.display = "none";
+                                const fallback = target.parentElement?.querySelector(
+                                  ".source-image-fallback"
+                                );
+                                if (fallback) {
+                                  (fallback as HTMLElement).style.display = "flex";
+                                }
+                              }}
+                            />
+                            <div className="source-image-fallback absolute inset-0 hidden items-center justify-center text-[10px] text-muted-foreground">
+                              画像なし
+                            </div>
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            検索対象の画像
+                          </div>
+                        </div>
+                      )}
 
                       <Button
                         type="button"

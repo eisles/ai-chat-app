@@ -70,6 +70,12 @@ type RawProduct = {
     category2_name?: string | null;
     category3_name?: string | null;
   }> | null;
+  category?: string | null;
+  category_name?: string | null;
+  genre?: string | null;
+  genre_name?: string | null;
+  product_type?: string | null;
+  item_type?: string | null;
   shipping_frozen_flag?: number | null;
   shipping_refrigerated_flag?: number | null;
   shipping_ordinary_flag?: number | null;
@@ -115,17 +121,41 @@ function coerceRaw(metadata: Record<string, unknown> | null): RawProduct | null 
   return raw as RawProduct;
 }
 
+function normalizeCategoryText(value: string) {
+  return value.trim().toLowerCase().replace(/[\s・/／、,]/g, "");
+}
+
+function collectCategoryCandidates(raw: RawProduct) {
+  const candidates: string[] = [];
+  if (raw.categories && raw.categories.length > 0) {
+    raw.categories.forEach((entry) => {
+      if (entry.category1_name) candidates.push(entry.category1_name);
+      if (entry.category2_name) candidates.push(entry.category2_name);
+      if (entry.category3_name) candidates.push(entry.category3_name);
+    });
+  }
+  if (raw.category) candidates.push(raw.category);
+  if (raw.category_name) candidates.push(raw.category_name);
+  if (raw.genre) candidates.push(raw.genre);
+  if (raw.genre_name) candidates.push(raw.genre_name);
+  if (raw.product_type) candidates.push(raw.product_type);
+  if (raw.item_type) candidates.push(raw.item_type);
+  return candidates.filter((value) => value.trim().length > 0);
+}
+
 function matchesCategory(raw: RawProduct | null, category: string) {
-  if (!raw?.categories || raw.categories.length === 0) return false;
-  return raw.categories.some((entry) => {
-    const names = [
-      entry.category1_name,
-      entry.category2_name,
-      entry.category3_name,
-    ]
-      .filter((value) => typeof value === "string" && value.trim().length > 0)
-      .join(" ");
-    return names.includes(category);
+  if (!raw) return false;
+  const normalizedTarget = normalizeCategoryText(category);
+  if (!normalizedTarget) return false;
+  const candidates = collectCategoryCandidates(raw);
+  if (candidates.length === 0) return false;
+  return candidates.some((candidate) => {
+    const normalizedCandidate = normalizeCategoryText(candidate);
+    if (!normalizedCandidate) return false;
+    return (
+      normalizedCandidate.includes(normalizedTarget) ||
+      normalizedTarget.includes(normalizedCandidate)
+    );
   });
 }
 

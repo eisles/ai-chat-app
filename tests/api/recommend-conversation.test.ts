@@ -127,6 +127,54 @@ describe("POST /api/recommend/conversation", () => {
     });
   });
 
+  it("旅行・体験カテゴリは raw のカテゴリ系フィールドでも一致する", async () => {
+    createCompletion.mockResolvedValue({
+      content:
+        "{\"budget\":\"30,001円以上\",\"category\":\"旅行・体験\",\"purpose\":\"自宅用\",\"delivery\":[\"冷凍\"],\"allergen\":\"なし\"}",
+    });
+    generateTextEmbedding.mockResolvedValue({
+      vector: [0.2, 0.3],
+      model: "text-embedding-test",
+      dim: 2,
+      normalized: null,
+      durationMs: 12,
+      byteSize: 8,
+    });
+    searchTextEmbeddings.mockResolvedValue([
+      {
+        id: "id-travel-1",
+        productId: "p-travel-1",
+        cityCode: null,
+        text: "テスト旅行",
+        metadata: {
+          raw: {
+            amount: 50000,
+            shipping_frozen_flag: 1,
+            category_name: "旅行",
+            genre: "体験",
+          },
+        },
+        score: 0.82,
+        amount: 50000,
+      },
+    ]);
+
+    const req = new Request("http://localhost/api/recommend/conversation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "旅行体験が欲しい" }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(json.action).toBe("recommend");
+    expect(json.matches).toHaveLength(1);
+    expect(json.queryText).toContain("カテゴリ: 旅行・体験");
+  });
+
   it("配送をスキップ入力した場合は追加条件の質問に進む", async () => {
     createCompletion
       .mockResolvedValueOnce({
