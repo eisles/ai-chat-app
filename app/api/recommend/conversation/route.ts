@@ -28,6 +28,8 @@ export const runtime = "nodejs";
 
 const DEFAULT_TOP_K = 10;
 const DEFAULT_THRESHOLD = 0.35;
+const UUID_V4_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 class ApiError extends Error {
   status: number;
@@ -45,6 +47,8 @@ type Payload = {
   threshold?: unknown;
   selectedStepKey?: unknown;
   selectedValue?: unknown;
+  userId?: unknown;
+  useLlmPersonalization?: unknown;
 };
 
 function isOptionalStep(
@@ -91,6 +95,24 @@ function parseSelectedAnswer(stepKey: unknown, selectedValue: unknown) {
     stepKey: stepKey as ConversationStepKey,
     value,
   };
+}
+
+function parseUserId(value: unknown): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new ApiError("userIdが不正です", 400);
+  }
+  const trimmed = value.trim();
+  if (!UUID_V4_REGEX.test(trimmed)) {
+    throw new ApiError("userIdはUUID v4形式で指定してください", 400);
+  }
+  return trimmed;
+}
+
+function parseUseLlmPersonalization(value: unknown): boolean {
+  return value === true;
 }
 
 function applySelectedAnswer(extracted: SlotState, stepKey: ConversationStepKey, value: string) {
@@ -152,6 +174,10 @@ function errorResponse(error: unknown) {
 export async function POST(req: Request) {
   try {
     const body = (await req.json()) as Payload;
+    const userId = parseUserId(body.userId);
+    const requestUseLlm = parseUseLlmPersonalization(body.useLlmPersonalization);
+    const envEnabled = process.env.RECOMMEND_PERSONALIZATION_LLM_ENABLED === "true";
+    const finalUseLlm = envEnabled && requestUseLlm;
     const published = await getPublishedQuestionSet();
     const activeSteps =
       published?.steps && published.steps.length > 0
@@ -222,6 +248,8 @@ export async function POST(req: Request) {
       cityCode: slots.cityCode,
       topK,
       threshold,
+      userId: userId ?? undefined,
+      useLlmPersonalization: finalUseLlm,
     };
     const result = await recommendByAnswers(input);
 

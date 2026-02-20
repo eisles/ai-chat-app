@@ -3,6 +3,8 @@ import {
   searchTextEmbeddings,
   type SearchMatch,
 } from "@/lib/image-text-search";
+import { applyPersonalization } from "@/lib/recommend-personalization/rerank";
+import { buildUserPreferenceProfile } from "@/lib/recommend-personalization/profile";
 
 const DEFAULT_TOP_K = 10;
 const DEFAULT_THRESHOLD = 0.3;
@@ -18,6 +20,8 @@ export type RecommendByAnswersInput = {
   topK?: number;
   threshold?: number;
   queryText?: string;
+  userId?: string;
+  useLlmPersonalization?: boolean;
 };
 
 export type BudgetRange = {
@@ -28,7 +32,9 @@ export type BudgetRange = {
 export type RecommendByAnswersResult = {
   queryText: string;
   budgetRange: BudgetRange | null;
-  matches: SearchMatch[];
+  matches: Array<
+    SearchMatch & { personalBoost?: number; personalReasons?: string[] }
+  >;
 };
 
 export function parseTopK(value: unknown, fallback = DEFAULT_TOP_K) {
@@ -210,7 +216,19 @@ export async function recommendByAnswers(
           return input.delivery?.every((entry) => matchesDelivery(raw, entry));
         })
       : categoryFiltered;
-  const matches = deliveryFiltered;
+  let matches: RecommendByAnswersResult["matches"] = deliveryFiltered;
+  if (input.userId) {
+    try {
+      const profile = await buildUserPreferenceProfile(input.userId, {
+        useLlmPersonalization: input.useLlmPersonalization === true,
+      });
+      if (profile) {
+        matches = applyPersonalization(deliveryFiltered, profile);
+      }
+    } catch {
+      matches = deliveryFiltered;
+    }
+  }
 
   return {
     queryText,

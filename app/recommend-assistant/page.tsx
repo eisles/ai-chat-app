@@ -5,6 +5,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { DEFAULT_QUESTION_SET } from "@/lib/recommend-assistant-config/default-config";
 import type { AssistantStepConfig } from "@/lib/recommend-assistant-config/types";
+import { getOrCreateRecommendUserId } from "@/lib/recommend-personalization/client-user-id";
 import type {
   ConversationSession,
   ConversationStepKey,
@@ -54,6 +55,8 @@ type Match = {
   metadata: Record<string, unknown> | null;
   score: number;
   amount: number | null;
+  personalBoost?: number;
+  personalReasons?: string[];
 };
 
 type SimilarImageResult = {
@@ -95,6 +98,15 @@ type SimilarImageApiResponse = {
 type Message = {
   role: "assistant" | "user";
   text: string;
+};
+
+type ClickPayload = {
+  userId: string;
+  productId: string;
+  cityCode?: string | null;
+  source?: string;
+  score?: number | null;
+  metadata?: Record<string, unknown> | null;
 };
 
 const DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT = 20;
@@ -180,6 +192,11 @@ function buildReasonLabels(slots: SlotState, match: Match): string[] {
   if (slots.delivery && slots.delivery.length > 0) {
     labels.push("配送条件一致");
   }
+  if (match.personalReasons && match.personalReasons.length > 0) {
+    labels.push(...match.personalReasons);
+  } else if (match.personalBoost && match.personalBoost > 0) {
+    labels.push("最近のクリック傾向に一致");
+  }
   return labels;
 }
 
@@ -223,6 +240,34 @@ function parseSimilarImageLimit(input: string): number {
   );
 }
 
+function trackClick(payload: ClickPayload) {
+  const body = JSON.stringify(payload);
+  if (navigator.sendBeacon) {
+    const blob = new Blob([body], { type: "application/json" });
+    if (navigator.sendBeacon("/api/recommend/events/click", blob)) return;
+  }
+  void fetch("/api/recommend/events/click", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true,
+  });
+}
+
+function buildClickMetadata(match: Match, queryText: string | null): Record<string, unknown> | null {
+  const metadata: Record<string, unknown> = {};
+  if (queryText) {
+    metadata.queryText = queryText;
+  }
+  if (match.personalBoost && match.personalBoost > 0) {
+    metadata.personalBoost = match.personalBoost;
+  }
+  if (match.personalReasons && match.personalReasons.length > 0) {
+    metadata.personalReasons = match.personalReasons;
+  }
+  return Object.keys(metadata).length > 0 ? metadata : null;
+}
+
 function createInitialSession(): ConversationSession {
   return {
     slots: {},
@@ -255,6 +300,8 @@ export default function RecommendAssistantPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasInteracted, setHasInteracted] = useState(false);
+  const [recommendUserId, setRecommendUserId] = useState<string | null>(null);
+  const [useLlmPersonalization, setUseLlmPersonalization] = useState(false);
   const [similarImageSourceUrl, setSimilarImageSourceUrl] = useState<string | null>(null);
   const [similarImageSourceProductId, setSimilarImageSourceProductId] = useState<string | null>(
     null
@@ -331,6 +378,10 @@ export default function RecommendAssistantPage() {
   }, [hasInteracted, resetToSteps]);
 
   useEffect(() => {
+    setRecommendUserId(getOrCreateRecommendUserId());
+  }, []);
+
+  useEffect(() => {
     if (similarImageSearchRequestId <= 0) return;
     const frameId = requestAnimationFrame(() => {
       similarImageResultAnchorRef.current?.scrollIntoView({
@@ -367,6 +418,8 @@ export default function RecommendAssistantPage() {
           threshold: threshold ? Number(threshold) : undefined,
           selectedStepKey: options?.selectedStepKey ?? undefined,
           selectedValue: options?.selectedStepKey ? userText : undefined,
+          userId: recommendUserId ?? undefined,
+          useLlmPersonalization,
         }),
       });
 
@@ -589,21 +642,30 @@ export default function RecommendAssistantPage() {
                 placeholder="0.35"
               />
             </div>
-            <div className="space-y-1">
-              <div className="text-xs text-muted-foreground">画像類似件数 (`limit`)</div>
-              <Input
-                type="number"
-                min={MIN_SIMILAR_IMAGE_RESULT_LIMIT}
-                max={MAX_SIMILAR_IMAGE_RESULT_LIMIT}
-                step={1}
-                value={similarImageLimit}
-                onChange={(event) => setSimilarImageLimit(event.target.value)}
-                placeholder={String(DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT)}
-              />
-            </div>
+          <div className="space-y-1">
+            <div className="text-xs text-muted-foreground">画像類似件数 (`limit`)</div>
+            <Input
+              type="number"
+              min={MIN_SIMILAR_IMAGE_RESULT_LIMIT}
+              max={MAX_SIMILAR_IMAGE_RESULT_LIMIT}
+              step={1}
+              value={similarImageLimit}
+              onChange={(event) => setSimilarImageLimit(event.target.value)}
+              placeholder={String(DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT)}
+            />
           </div>
+        </div>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            className="h-4 w-4 accent-primary"
+            checked={useLlmPersonalization}
+            onChange={(event) => setUseLlmPersonalization(event.target.checked)}
+          />
+          LLM個人化を使う（実験）
+        </label>
 
-          <form className="flex flex-col gap-2 sm:flex-row" onSubmit={handleSubmit}>
+        <form className="flex flex-col gap-2 sm:flex-row" onSubmit={handleSubmit}>
             <Input
               value={input}
               onChange={(event) => setInput(event.target.value)}
@@ -681,6 +743,16 @@ export default function RecommendAssistantPage() {
                   <div className="text-sm font-semibold">
                     score: {match.score.toFixed(4)}
                   </div>
+                  {match.personalBoost !== undefined && (
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      personalBoost: {match.personalBoost.toFixed(4)}
+                    </div>
+                  )}
+                  {match.personalReasons && match.personalReasons.length > 0 && (
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      personalReasons: {match.personalReasons.join(" / ")}
+                    </div>
+                  )}
                   <div className="mt-1 text-xs text-muted-foreground">
                     productId: {match.productId}
                   </div>
@@ -706,6 +778,8 @@ export default function RecommendAssistantPage() {
                 const productUrl = buildProductUrl(match.productId, match.cityCode);
                 const displayName = name || `商品ID: ${match.productId}`;
                 const reasonLabels = buildReasonLabels(session.slots, match);
+                const clickMetadata = buildClickMetadata(match, queryText);
+                const isPersonalized = (match.personalBoost ?? 0) > 0;
                 const isSearchingThisImage =
                   similarImageLoading &&
                   !!image &&
@@ -750,6 +824,17 @@ export default function RecommendAssistantPage() {
                         rel="noopener noreferrer"
                         className="line-clamp-2 text-sm font-medium hover:text-primary hover:underline"
                         title={displayName}
+                        onClick={() => {
+                          if (!recommendUserId) return;
+                          trackClick({
+                            userId: recommendUserId,
+                            productId: match.productId,
+                            cityCode: match.cityCode,
+                            source: "recommend-assistant",
+                            score: match.score,
+                            metadata: clickMetadata,
+                          });
+                        }}
                       >
                         {displayName}
                         <span className="ml-1 inline-block text-xs text-muted-foreground">↗</span>
@@ -758,6 +843,11 @@ export default function RecommendAssistantPage() {
                       <div className="mt-2 text-lg font-bold text-primary">
                         {match.amount ? `${match.amount.toLocaleString()}円` : "金額未設定"}
                       </div>
+                      {isPersonalized && (
+                        <div className="mt-2 inline-flex rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
+                          あなた向け
+                        </div>
+                      )}
 
                       {reasonLabels.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1">

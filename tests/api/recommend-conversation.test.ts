@@ -5,6 +5,7 @@ const generateTextEmbedding = vi.fn();
 const searchTextEmbeddings = vi.fn();
 const getRecommendCategoryQuickReplies = vi.fn();
 const getPublishedQuestionSet = vi.fn();
+const recommendByAnswers = vi.fn();
 
 vi.mock("@/lib/llm-providers", () => ({
   createCompletion,
@@ -23,6 +24,17 @@ vi.mock("@/lib/image-text-search", () => ({
   searchTextEmbeddings,
   assertOpenAIError: () => null,
 }));
+
+vi.mock("@/lib/recommend/by-answers-engine", async () => {
+  const actual = await vi.importActual<
+    typeof import("@/lib/recommend/by-answers-engine")
+  >("@/lib/recommend/by-answers-engine");
+  recommendByAnswers.mockImplementation(actual.recommendByAnswers);
+  return {
+    ...actual,
+    recommendByAnswers,
+  };
+});
 
 vi.mock("@/lib/recommend/category-candidates", () => ({
   getRecommendCategoryQuickReplies,
@@ -374,5 +386,85 @@ describe("POST /api/recommend/conversation", () => {
     expect(json.nextQuestionKey).toBe("purpose");
     expect(json.assistantMessage).toBe("新しい用途を教えてください");
     expect(json.quickReplies).toContain("自分用");
+  });
+
+  it("userIdが不正な場合は400を返す", async () => {
+    const req = new Request("http://localhost/api/recommend/conversation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "1万円くらい", userId: "invalid" }),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+  });
+
+  it("LLM個人化はenvとrequestの両方がtrueのときのみ有効になる", async () => {
+    const originalEnv = process.env.RECOMMEND_PERSONALIZATION_LLM_ENABLED;
+
+    recommendByAnswers.mockResolvedValueOnce({
+      queryText: "テスト",
+      budgetRange: null,
+      matches: [],
+    });
+    recommendByAnswers.mockResolvedValueOnce({
+      queryText: "テスト",
+      budgetRange: null,
+      matches: [],
+    });
+
+    createCompletion.mockResolvedValue({
+      content:
+        "{\"budget\":\"10,001〜20,000円\",\"category\":\"魚介\",\"purpose\":\"自宅用\",\"delivery\":[\"冷凍\"],\"allergen\":\"なし\"}",
+    });
+    generateTextEmbedding.mockResolvedValue({
+      vector: [0.1, 0.2],
+      model: "text-embedding-test",
+      dim: 2,
+      normalized: null,
+      durationMs: 12,
+      byteSize: 8,
+    });
+    searchTextEmbeddings.mockResolvedValue([
+      {
+        id: "id-1",
+        productId: "p-1",
+        cityCode: null,
+        text: "テスト",
+        metadata: null,
+        score: 0.91,
+        amount: 12000,
+      },
+    ]);
+
+    process.env.RECOMMEND_PERSONALIZATION_LLM_ENABLED = "false";
+    const reqDisabled = new Request("http://localhost/api/recommend/conversation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "1万円前後で魚介が欲しい",
+        userId: "6f4e2d7a-4b6d-4a52-9d62-0d0c2b7c8e1a",
+        useLlmPersonalization: true,
+      }),
+    });
+    await POST(reqDisabled);
+    const disabledInput = recommendByAnswers.mock.calls.at(-1)?.[0];
+    expect(disabledInput?.useLlmPersonalization).toBe(false);
+
+    process.env.RECOMMEND_PERSONALIZATION_LLM_ENABLED = "true";
+    const reqEnabled = new Request("http://localhost/api/recommend/conversation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "1万円前後で魚介が欲しい",
+        userId: "6f4e2d7a-4b6d-4a52-9d62-0d0c2b7c8e1a",
+        useLlmPersonalization: true,
+      }),
+    });
+    await POST(reqEnabled);
+    const enabledInput = recommendByAnswers.mock.calls.at(-1)?.[0];
+    expect(enabledInput?.useLlmPersonalization).toBe(true);
+
+    process.env.RECOMMEND_PERSONALIZATION_LLM_ENABLED = originalEnv;
   });
 });
