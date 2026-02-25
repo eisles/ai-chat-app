@@ -42,7 +42,7 @@ export const DEFAULT_QUESTION_SET: AssistantQuestionSetSeed = {
     {
       key: "delivery",
       question: "配送希望はありますか？（冷凍・冷蔵・常温・日時指定など）",
-      quickReplies: ["冷凍", "冷蔵", "常温", "日時指定できる", "こだわらない"],
+      quickReplies: ["特になし", "冷凍", "冷蔵", "常温", "日時指定できる"],
       optional: true,
       enabled: true,
       order: 4,

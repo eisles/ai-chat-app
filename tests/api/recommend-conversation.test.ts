@@ -310,7 +310,40 @@ describe("POST /api/recommend/conversation", () => {
     expect(res.status).toBe(200);
     expect(json.action).toBe("ask");
     expect(json.nextQuestionKey).toBe("delivery");
+    expect(json.quickReplies[0]).toBe("特になし");
     expect(json.session.slots.category).toBe("米・パン");
+  });
+
+  it("旅行・体験系カテゴリなら配送質問をスキップして追加条件へ進む", async () => {
+    createCompletion.mockResolvedValue({
+      content: "{}",
+    });
+
+    const req = new Request("http://localhost/api/recommend/conversation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "旅行・体験",
+        selectedStepKey: "category",
+        selectedValue: "旅行・体験",
+        session: {
+          slots: {
+            purpose: "自宅用",
+            budget: "10,001〜20,000円",
+          },
+          askedKeys: ["purpose", "budget"],
+        },
+      }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.action).toBe("ask");
+    expect(json.nextQuestionKey).toBe("additional");
+    expect(json.quickReplies).toContain("特になし");
+    expect(json.session.slots.category).toBe("旅行・体験");
   });
 
   it("公開済み設定がある場合は質問文と選択肢に反映される", async () => {

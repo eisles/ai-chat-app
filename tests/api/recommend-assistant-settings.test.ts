@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const generateStepDraftsFromMetadata = vi.fn();
 const listQuestionSets = vi.fn();
 const createDraftSet = vi.fn();
+const updateQuestionSet = vi.fn();
+const deleteQuestionSet = vi.fn();
 const publishSet = vi.fn();
 
 vi.mock("@/lib/recommend-assistant-config/candidate-generator", () => ({
@@ -12,6 +14,8 @@ vi.mock("@/lib/recommend-assistant-config/candidate-generator", () => ({
 vi.mock("@/lib/recommend-assistant-config/repository", () => ({
   listQuestionSets,
   createDraftSet,
+  updateQuestionSet,
+  deleteQuestionSet,
   publishSet,
 }));
 
@@ -23,6 +27,9 @@ const { GET: getSets, POST: postSets } = await import(
 );
 const { POST: postPublish } = await import(
   "@/app/api/recommend-assistant-settings/publish/route"
+);
+const { PATCH: patchSetById, DELETE: deleteSetById } = await import(
+  "@/app/api/recommend-assistant-settings/sets/[id]/route"
 );
 
 describe("recommend-assistant-settings APIs", () => {
@@ -212,5 +219,126 @@ describe("recommend-assistant-settings APIs", () => {
     expect(res.status).toBe(200);
     expect(json.ok).toBe(true);
     expect(publishSet).toHaveBeenCalledWith("set-2");
+  });
+
+  it("sets/[id] PATCH updates set", async () => {
+    updateQuestionSet.mockResolvedValue({
+      id: "set-2",
+      name: "更新後",
+      version: 2,
+      status: "draft",
+      steps: [
+        {
+          key: "purpose",
+          question: "用途を教えてください",
+          quickReplies: ["自宅用"],
+          optional: false,
+          enabled: true,
+          order: 1,
+        },
+      ],
+      meta: {},
+      createdAt: "2026-02-17T00:00:00.000Z",
+      updatedAt: "2026-02-17T00:00:00.000Z",
+      publishedAt: null,
+    });
+
+    const req = new Request(
+      "http://localhost/api/recommend-assistant-settings/sets/set-2",
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "更新後",
+          steps: [
+            {
+              key: "purpose",
+              question: "用途を教えてください",
+              quickReplies: ["自宅用"],
+              optional: false,
+              enabled: true,
+              order: 1,
+            },
+          ],
+        }),
+      }
+    );
+
+    const res = await patchSetById(req, { params: { id: "set-2" } });
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(json.set.name).toBe("更新後");
+    expect(updateQuestionSet).toHaveBeenCalledWith(
+      "set-2",
+      expect.objectContaining({ name: "更新後" })
+    );
+  });
+
+  it("sets/[id] PATCH returns 404 when set is missing", async () => {
+    updateQuestionSet.mockResolvedValue(null);
+
+    const req = new Request(
+      "http://localhost/api/recommend-assistant-settings/sets/missing",
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "更新後",
+          steps: [
+            {
+              key: "purpose",
+              question: "用途を教えてください",
+              quickReplies: ["自宅用"],
+              optional: false,
+              enabled: true,
+              order: 1,
+            },
+          ],
+        }),
+      }
+    );
+
+    const res = await patchSetById(req, { params: { id: "missing" } });
+    const json = await res.json();
+
+    expect(res.status).toBe(404);
+    expect(json.ok).toBe(false);
+  });
+
+  it("sets/[id] DELETE deletes set", async () => {
+    deleteQuestionSet.mockResolvedValue(true);
+
+    const req = new Request(
+      "http://localhost/api/recommend-assistant-settings/sets/set-2",
+      {
+        method: "DELETE",
+      }
+    );
+
+    const res = await deleteSetById(req, { params: { id: "set-2" } });
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(deleteQuestionSet).toHaveBeenCalledWith("set-2");
+  });
+
+  it("sets/[id] DELETE returns 404 when set cannot be deleted", async () => {
+    deleteQuestionSet.mockResolvedValue(false);
+
+    const req = new Request(
+      "http://localhost/api/recommend-assistant-settings/sets/set-1",
+      {
+        method: "DELETE",
+      }
+    );
+
+    const res = await deleteSetById(req, { params: { id: "set-1" } });
+    const json = await res.json();
+
+    expect(res.status).toBe(404);
+    expect(json.ok).toBe(false);
   });
 });

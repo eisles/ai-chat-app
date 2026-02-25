@@ -40,6 +40,33 @@ function normalizeString(value: string | undefined) {
   return value.trim();
 }
 
+function normalizeCategoryText(value: string): string {
+  return value.trim().replace(/[\s・/／、,]/g, "");
+}
+
+function shouldSkipDeliveryForCategory(category: string | undefined): boolean {
+  const normalized = normalizeCategoryText(normalizeString(category));
+  if (!normalized) return false;
+
+  const nonDeliveryKeywords = [
+    "旅行",
+    "体験",
+    "温泉",
+    "宿泊",
+    "ホテル",
+    "旅館",
+    "チケット",
+    "利用券",
+    "クーポン",
+    "アクティビティ",
+    "観光",
+    "レジャー",
+    "入場",
+  ];
+
+  return nonDeliveryKeywords.some((keyword) => normalized.includes(keyword));
+}
+
 function hasAdditionalConstraints(slots: SlotState) {
   if (normalizeString(slots.allergen).length > 0) return true;
   if (normalizeString(slots.prefecture).length > 0) return true;
@@ -65,8 +92,9 @@ function isSkipPattern(step: QuestionConfig, message: string) {
 function toAskedSet(
   askedKeys: ConversationStepKey[],
   slots: SlotState,
-  stepKeySet: Set<ConversationStepKey>
+  flow: QuestionConfig[]
 ) {
+  const stepKeySet = new Set(flow.map((step) => step.key));
   const asked = new Set<ConversationStepKey>(
     askedKeys.filter((key) => stepKeySet.has(key))
   );
@@ -81,6 +109,14 @@ function toAskedSet(
     asked.add("category");
   }
   if (stepKeySet.has("delivery") && slots.delivery && slots.delivery.length > 0) {
+    asked.add("delivery");
+  }
+  const deliveryStep = flow.find((step) => step.key === "delivery");
+  if (
+    deliveryStep?.optional &&
+    stepKeySet.has("delivery") &&
+    shouldSkipDeliveryForCategory(slots.category)
+  ) {
     asked.add("delivery");
   }
   if (stepKeySet.has("additional") && hasAdditionalConstraints(slots)) {
@@ -118,8 +154,7 @@ export function getQuestionState(
   steps?: AssistantStepConfig[]
 ) {
   const flow = normalizeQuestionFlow(steps);
-  const stepKeySet = new Set(flow.map((step) => step.key));
-  const askedSet = toAskedSet(askedKeys, slots, stepKeySet);
+  const askedSet = toAskedSet(askedKeys, slots, flow);
   const pendingStep = getFirstPendingStep(flow, askedSet);
 
   if (pendingStep) {

@@ -2,6 +2,13 @@
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { DEFAULT_QUESTION_SET } from "@/lib/recommend-assistant-config/default-config";
 import type { AssistantStepConfig } from "@/lib/recommend-assistant-config/types";
@@ -11,6 +18,7 @@ import type {
   ConversationStepKey,
   SlotState,
 } from "@/lib/recommend-conversation/types";
+import { Loader2Icon } from "lucide-react";
 import Image from "next/image";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -26,19 +34,32 @@ function buildProductUrl(productId: string, cityCode: string | null): string {
 function extractProductInfo(metadata: Record<string, unknown> | null): {
   name: string | null;
   image: string | null;
+  description: string | null;
 } {
   if (!metadata) {
-    return { name: null, image: null };
+    return { name: null, image: null, description: null };
   }
 
   const raw = metadata.raw as Record<string, unknown> | undefined;
   if (!raw) {
-    return { name: null, image: null };
+    return { name: null, image: null, description: null };
   }
+
+  const descriptionCandidates = [
+    raw.catchphrase,
+    raw.description,
+    raw.shipping_text,
+    raw.application_text,
+    raw.bulk_text,
+  ];
+  const description = descriptionCandidates.find(
+    (value): value is string => typeof value === "string" && value.trim().length > 0
+  );
 
   return {
     name: typeof raw.name === "string" ? raw.name : null,
     image: typeof raw.image === "string" ? raw.image : null,
+    description: description ?? null,
   };
 }
 
@@ -95,6 +116,31 @@ type SimilarImageApiResponse = {
   error?: string;
 };
 
+type AgentMatch = Match & {
+  agentReason: string;
+};
+
+type AgentExtractionSummary = {
+  searchStrategy?:
+    | "history_only"
+    | "current_conditions_fallback"
+    | "current_conditions_only";
+  currentConditions?: string[];
+  personalizationSignals?: string[];
+  rerankRules?: string[];
+  personalizedMatchCount?: number;
+};
+
+type AgentApiResponse = {
+  ok: boolean;
+  finalUseLlm?: boolean;
+  queryText?: string;
+  agentMessage?: string;
+  agentMatches?: AgentMatch[];
+  agentExtractionSummary?: AgentExtractionSummary;
+  error?: string;
+};
+
 type Message = {
   role: "assistant" | "user";
   text: string;
@@ -120,6 +166,13 @@ const FIELD_LABELS: Record<string, string> = {
   delivery: "配送希望",
   additional: "追加条件",
 };
+
+const AGENT_LOADING_STAGES = [
+  "クリック履歴と傾向を解析しています",
+  "履歴ベース候補を検索しています",
+  "現在条件との整合を確認しています",
+  "おすすめ候補を整理しています",
+];
 
 type InitialState = {
   messages: Message[];
@@ -240,6 +293,37 @@ function parseSimilarImageLimit(input: string): number {
   );
 }
 
+function buildModalDescription(match: Match): string {
+  const info = extractProductInfo(match.metadata);
+  if (info.description) return info.description;
+  return match.text;
+}
+
+function buildModalMatchFromSimilarResult(row: SimilarImageResult): Match {
+  const info = extractProductInfo(row.metadata);
+  const fallbackText = row.product_id ? `商品ID: ${row.product_id}` : `ID: ${row.id}`;
+  return {
+    id: `similar-${row.id}`,
+    productId: row.product_id ?? row.id,
+    cityCode: row.city_code ?? null,
+    text: info.name ?? fallbackText,
+    metadata: row.metadata,
+    score: Math.max(0, 1 - row.distance),
+    amount: row.amount,
+  };
+}
+
+function formatAgentSearchStrategy(
+  strategy: AgentExtractionSummary["searchStrategy"]
+): string {
+  if (strategy === "history_only") return "クリック履歴優先で抽出";
+  if (strategy === "current_conditions_fallback") {
+    return "クリック履歴で不足したため現在条件へフォールバック";
+  }
+  if (strategy === "current_conditions_only") return "現在条件のみで抽出";
+  return "-";
+}
+
 function trackClick(payload: ClickPayload) {
   const body = JSON.stringify(payload);
   if (navigator.sendBeacon) {
@@ -254,11 +338,16 @@ function trackClick(payload: ClickPayload) {
   });
 }
 
-function buildClickMetadata(match: Match, queryText: string | null): Record<string, unknown> | null {
+function buildClickMetadata(
+  match: Match,
+  queryText: string | null,
+  interaction: "external_link" | "modal_interest" | "agent_recommend_link"
+): Record<string, unknown> | null {
   const metadata: Record<string, unknown> = {};
   if (queryText) {
     metadata.queryText = queryText;
   }
+  metadata.interaction = interaction;
   if (match.personalBoost && match.personalBoost > 0) {
     metadata.personalBoost = match.personalBoost;
   }
@@ -302,6 +391,16 @@ export default function RecommendAssistantPage() {
   const [hasInteracted, setHasInteracted] = useState(false);
   const [recommendUserId, setRecommendUserId] = useState<string | null>(null);
   const [useLlmPersonalization, setUseLlmPersonalization] = useState(false);
+  const [modalMatch, setModalMatch] = useState<Match | null>(null);
+  const [modalInterestTracked, setModalInterestTracked] = useState(false);
+  const [agentMatches, setAgentMatches] = useState<AgentMatch[]>([]);
+  const [agentMessage, setAgentMessage] = useState<string | null>(null);
+  const [agentFinalUseLlm, setAgentFinalUseLlm] = useState<boolean | null>(null);
+  const [agentExtractionSummary, setAgentExtractionSummary] =
+    useState<AgentExtractionSummary | null>(null);
+  const [agentLoading, setAgentLoading] = useState(false);
+  const [agentLoadingStageIndex, setAgentLoadingStageIndex] = useState(0);
+  const [agentError, setAgentError] = useState<string | null>(null);
   const [similarImageSourceUrl, setSimilarImageSourceUrl] = useState<string | null>(null);
   const [similarImageSourceProductId, setSimilarImageSourceProductId] = useState<string | null>(
     null
@@ -392,6 +491,20 @@ export default function RecommendAssistantPage() {
     return () => cancelAnimationFrame(frameId);
   }, [similarImageSearchRequestId]);
 
+  useEffect(() => {
+    if (!agentLoading) {
+      setAgentLoadingStageIndex(0);
+      return;
+    }
+    setAgentLoadingStageIndex(0);
+    const intervalId = window.setInterval(() => {
+      setAgentLoadingStageIndex(
+        (prev) => (prev + 1) % AGENT_LOADING_STAGES.length
+      );
+    }, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [agentLoading]);
+
   async function submitMessage(
     rawText: string,
     options?: { selectedStepKey?: ConversationStepKey | null }
@@ -452,10 +565,20 @@ export default function RecommendAssistantPage() {
         setNextQuestionKey(null);
         setQuickReplies([]);
         setMissingKeys([]);
+        setAgentMatches([]);
+        setAgentMessage(null);
+        setAgentFinalUseLlm(null);
+        setAgentExtractionSummary(null);
+        setAgentError(null);
         clearSimilarImageResults();
       } else {
         setMatches([]);
         setQueryText(null);
+        setAgentMatches([]);
+        setAgentMessage(null);
+        setAgentFinalUseLlm(null);
+        setAgentExtractionSummary(null);
+        setAgentError(null);
         clearSimilarImageResults();
       }
     } catch (err) {
@@ -521,6 +644,53 @@ export default function RecommendAssistantPage() {
     }
   }
 
+  async function requestAgentRecommendations() {
+    if (agentLoading || !recommendUserId) return;
+
+    setAgentLoading(true);
+    setAgentError(null);
+    setAgentMessage(null);
+    setAgentMatches([]);
+    setAgentFinalUseLlm(null);
+    setAgentExtractionSummary(null);
+
+    try {
+      const res = await fetch("/api/recommend/agent-personalized", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session,
+          topK: topK ? Number(topK) : undefined,
+          threshold: threshold ? Number(threshold) : undefined,
+          userId: recommendUserId,
+          useLlmPersonalization,
+        }),
+      });
+
+      let data: AgentApiResponse;
+      try {
+        data = (await res.json()) as AgentApiResponse;
+      } catch {
+        data = { ok: false, error: `Failed to parse response (status ${res.status})` };
+      }
+
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error ?? `Request failed (status ${res.status})`);
+      }
+
+      setAgentMessage(data.agentMessage ?? null);
+      setAgentMatches(data.agentMatches ?? []);
+      setAgentFinalUseLlm(
+        typeof data.finalUseLlm === "boolean" ? data.finalUseLlm : null
+      );
+      setAgentExtractionSummary(data.agentExtractionSummary ?? null);
+    } catch (err) {
+      setAgentError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      setAgentLoading(false);
+    }
+  }
+
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     await submitMessage(input);
@@ -530,11 +700,49 @@ export default function RecommendAssistantPage() {
     if (isSubmitting) return;
     setHasInteracted(false);
     resetToSteps(activeSteps);
+    setModalMatch(null);
+    setModalInterestTracked(false);
+    setAgentMatches([]);
+    setAgentMessage(null);
+    setAgentFinalUseLlm(null);
+    setAgentExtractionSummary(null);
+    setAgentError(null);
     clearSimilarImageResults();
+  }
+
+  function openProductDetailModal(match: Match) {
+    setModalMatch(match);
+    setModalInterestTracked(false);
+  }
+
+  function handleModalOpenChange(open: boolean) {
+    if (open) return;
+    setModalMatch(null);
+    setModalInterestTracked(false);
+  }
+
+  function handleModalInterestClick() {
+    if (!modalMatch || modalInterestTracked || !recommendUserId) return;
+    trackClick({
+      userId: recommendUserId,
+      productId: modalMatch.productId,
+      cityCode: modalMatch.cityCode,
+      source: "recommend-assistant",
+      score: modalMatch.score,
+      metadata: buildClickMetadata(modalMatch, queryText, "modal_interest"),
+    });
+    setModalInterestTracked(true);
   }
 
   const slotSummary = buildSlotSummary(session.slots);
   const missingLabels = missingKeys.map((key) => FIELD_LABELS[key] ?? key);
+  const modalInfo = modalMatch ? extractProductInfo(modalMatch.metadata) : null;
+  const modalDisplayName = modalMatch
+    ? modalInfo?.name ?? `商品ID: ${modalMatch.productId}`
+    : null;
+  const modalImage = modalInfo?.image ?? null;
+  const modalDescription = modalMatch ? buildModalDescription(modalMatch) : "";
+  const agentLoadingStage = AGENT_LOADING_STAGES[agentLoadingStageIndex] ?? "";
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-10 sm:px-6 lg:px-8">
@@ -563,6 +771,7 @@ export default function RecommendAssistantPage() {
           <li>配送フィルタ: 指定された配送条件をすべて満たす商品のみ表示</li>
           <li>結果カードの理由表示: カテゴリ一致 / 予算一致 / 配送条件一致</li>
           <li>商品カードから画像ベクトル類似検索を実行（件数は指定可能、初期値20）</li>
+          <li>`AIエージェントにおすすめを聞く` ボタンで別ブロックに候補を表示</li>
         </ul>
       </Card>
 
@@ -716,7 +925,7 @@ export default function RecommendAssistantPage() {
             <div className="text-sm font-medium text-muted-foreground">
               推薦結果: {matches.length}件
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
               <Button
                 type="button"
                 size="sm"
@@ -732,6 +941,24 @@ export default function RecommendAssistantPage() {
                 onClick={() => setDisplayMode("product")}
               >
                 商品カード表示
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={agentLoading || !recommendUserId}
+                onClick={() => {
+                  void requestAgentRecommendations();
+                }}
+              >
+                {agentLoading ? (
+                  <span className="inline-flex items-center gap-2">
+                    <Loader2Icon className="h-4 w-4 animate-spin" />
+                    AIエージェントが検討中...
+                  </span>
+                ) : (
+                  "AIエージェントにおすすめを聞く"
+                )}
               </Button>
             </div>
           </div>
@@ -778,7 +1005,7 @@ export default function RecommendAssistantPage() {
                 const productUrl = buildProductUrl(match.productId, match.cityCode);
                 const displayName = name || `商品ID: ${match.productId}`;
                 const reasonLabels = buildReasonLabels(session.slots, match);
-                const clickMetadata = buildClickMetadata(match, queryText);
+                const clickMetadata = buildClickMetadata(match, queryText, "external_link");
                 const isPersonalized = (match.personalBoost ?? 0) > 0;
                 const isSearchingThisImage =
                   similarImageLoading &&
@@ -866,8 +1093,18 @@ export default function RecommendAssistantPage() {
                       <Button
                         type="button"
                         size="sm"
-                        variant="outline"
+                        variant="secondary"
                         className="mt-3 w-full"
+                        onClick={() => openProductDetailModal(match)}
+                      >
+                        画像と説明をみる
+                      </Button>
+
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="mt-2 w-full"
                         disabled={!image || similarImageLoading}
                         onClick={() => {
                           if (!image) return;
@@ -892,6 +1129,258 @@ export default function RecommendAssistantPage() {
           まだおすすめが表示されていません。条件を入力してください。
         </div>
       )}
+
+      {(
+        agentLoading ||
+        agentError ||
+        agentMessage ||
+        agentExtractionSummary ||
+        agentMatches.length > 0
+      ) && (
+        <Card className="border bg-card/60 p-4 shadow-sm sm:p-6">
+          <div className="mb-3 text-sm font-medium text-foreground">エージェントのおすすめ</div>
+          {agentLoading && (
+            <div className="rounded-md border bg-muted/40 px-3 py-3">
+              <div className="flex items-center gap-2 text-sm text-foreground">
+                <Loader2Icon className="h-4 w-4 animate-spin text-primary" />
+                AIエージェントが考えています...
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {agentLoadingStage}
+              </div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                {[0, 1, 2].map((index) => (
+                  <div
+                    key={`agent-loading-skeleton-${index}`}
+                    className="rounded border bg-background/80 p-2"
+                  >
+                    <div className="aspect-[4/3] w-full animate-pulse rounded bg-muted" />
+                    <div className="mt-2 h-3 w-4/5 animate-pulse rounded bg-muted" />
+                    <div className="mt-2 h-3 w-3/5 animate-pulse rounded bg-muted" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {!agentLoading && agentError && (
+            <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {agentError}
+            </div>
+          )}
+          {!agentLoading && !agentError && agentMessage && (
+            <div className="rounded-md bg-muted/60 px-3 py-2 text-sm text-foreground">
+              {agentMessage}
+            </div>
+          )}
+          {!agentLoading && !agentError && agentExtractionSummary && (
+            <div className="mt-3 rounded-md border bg-background/60 p-3 text-xs">
+              <div className="font-medium text-foreground">
+                このおすすめの抽出内容
+              </div>
+              <div className="mt-1 text-muted-foreground">
+                LLM個人化経路:{" "}
+                {agentFinalUseLlm === null
+                  ? "-"
+                  : agentFinalUseLlm
+                    ? "有効"
+                    : "無効"}
+                {" / "}
+                個人化で並び替えが入った候補:{" "}
+                {agentExtractionSummary.personalizedMatchCount ?? 0}件
+              </div>
+              <div className="mt-1 text-muted-foreground">
+                抽出戦略:{" "}
+                {formatAgentSearchStrategy(agentExtractionSummary.searchStrategy)}
+              </div>
+              {agentExtractionSummary.currentConditions &&
+                agentExtractionSummary.currentConditions.length > 0 && (
+                  <div className="mt-2">
+                    <div className="font-medium text-foreground">現在条件</div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {agentExtractionSummary.currentConditions.map((line) => (
+                        <span key={line} className="rounded bg-muted px-2 py-0.5">
+                          {line}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              {agentExtractionSummary.personalizationSignals &&
+                agentExtractionSummary.personalizationSignals.length > 0 && (
+                  <div className="mt-2">
+                    <div className="font-medium text-foreground">
+                      クリック履歴シグナル
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {agentExtractionSummary.personalizationSignals.map((line) => (
+                        <span key={line} className="rounded bg-muted px-2 py-0.5">
+                          {line}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              {agentExtractionSummary.rerankRules &&
+                agentExtractionSummary.rerankRules.length > 0 && (
+                  <div className="mt-2">
+                    <div className="font-medium text-foreground">
+                      再スコアリングルール
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {agentExtractionSummary.rerankRules.map((line) => (
+                        <span key={line} className="rounded bg-muted px-2 py-0.5">
+                          {line}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+            </div>
+          )}
+
+          {!agentLoading && !agentError && agentMatches.length > 0 && (
+            <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {agentMatches.map((match) => {
+                const { name, image } = extractProductInfo(match.metadata);
+                const displayName = name || `商品ID: ${match.productId}`;
+                const productUrl = buildProductUrl(match.productId, match.cityCode);
+                const isSearchingThisImage =
+                  similarImageLoading &&
+                  !!image &&
+                  similarImageSourceUrl === image;
+
+                return (
+                  <div
+                    key={`agent-${match.id}`}
+                    className="overflow-hidden rounded-lg border bg-background/70 shadow-sm transition-shadow hover:shadow-md"
+                  >
+                    <div className="relative aspect-[4/3] bg-muted">
+                      {image ? (
+                        <Image
+                          src={image}
+                          alt={displayName}
+                          fill
+                          className="object-cover"
+                          sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+                        />
+                      ) : (
+                        <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
+                          画像なし
+                        </div>
+                      )}
+                    </div>
+                    <div className="p-3">
+                      <a
+                        href={productUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="line-clamp-2 text-sm font-medium hover:text-primary hover:underline"
+                        title={displayName}
+                        onClick={() => {
+                          if (!recommendUserId) return;
+                          trackClick({
+                            userId: recommendUserId,
+                            productId: match.productId,
+                            cityCode: match.cityCode,
+                            source: "recommend-assistant",
+                            score: match.score,
+                            metadata: buildClickMetadata(
+                              match,
+                              queryText,
+                              "agent_recommend_link"
+                            ),
+                          });
+                        }}
+                      >
+                        {displayName}
+                        <span className="ml-1 inline-block text-xs text-muted-foreground">↗</span>
+                      </a>
+                      <div className="mt-2 text-xs text-primary">{match.agentReason}</div>
+                      <div className="mt-2 text-lg font-bold text-primary">
+                        {match.amount ? `${match.amount.toLocaleString()}円` : "金額未設定"}
+                      </div>
+                      <div className="mt-2 text-xs text-muted-foreground">
+                        スコア: {match.score.toFixed(4)}
+                      </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        className="mt-3 w-full"
+                        onClick={() => openProductDetailModal(match)}
+                      >
+                        画像と説明をみる
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="mt-2 w-full"
+                        disabled={!image || similarImageLoading}
+                        onClick={() => {
+                          if (!image) return;
+                          void searchSimilarProductsByImage(image, match.productId);
+                        }}
+                      >
+                        {!image
+                          ? "画像がないため検索不可"
+                          : isSearchingThisImage
+                            ? "類似画像を検索中..."
+                            : "この画像に似た商品を検索"}
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Card>
+      )}
+
+      <Dialog open={!!modalMatch} onOpenChange={handleModalOpenChange}>
+        <DialogContent
+          className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"
+          onClick={handleModalInterestClick}
+        >
+          <DialogHeader>
+            <DialogTitle>{modalDisplayName ?? "商品詳細"}</DialogTitle>
+            <DialogDescription>
+              モーダル内をクリックすると「興味あり」として学習に反映します。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="relative aspect-[4/3] overflow-hidden rounded-md border bg-muted">
+              {modalImage ? (
+                <Image
+                  src={modalImage}
+                  alt={modalDisplayName ?? "商品画像"}
+                  fill
+                  className="object-cover"
+                  sizes="(max-width: 640px) 100vw, 720px"
+                />
+              ) : (
+                <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
+                  画像なし
+                </div>
+              )}
+            </div>
+            {modalMatch && (
+              <div className="space-y-2 text-sm">
+                <div className="text-muted-foreground">
+                  商品ID: {modalMatch.productId} / 市町村コード: {modalMatch.cityCode ?? "-"}
+                </div>
+                <div className="text-muted-foreground">
+                  金額:{" "}
+                  {modalMatch.amount ? `${modalMatch.amount.toLocaleString()}円` : "金額未設定"}
+                </div>
+                <div className="whitespace-pre-wrap leading-relaxed">
+                  {modalDescription}
+                </div>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {(similarImageSourceUrl || similarImageLoading) && (
         <div ref={similarImageResultAnchorRef}>
@@ -1068,8 +1557,18 @@ export default function RecommendAssistantPage() {
                       <Button
                         type="button"
                         size="sm"
-                        variant="outline"
+                        variant="secondary"
                         className="mt-3 w-full"
+                        onClick={() => openProductDetailModal(buildModalMatchFromSimilarResult(row))}
+                      >
+                        画像と説明をみる
+                      </Button>
+
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="mt-2 w-full"
                         disabled={sourceImageUrl.length === 0 || similarImageLoading}
                         onClick={() => {
                           if (!sourceImageUrl) return;

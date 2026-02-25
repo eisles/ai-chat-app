@@ -48,11 +48,11 @@ export async function generateStepDraftsFromMetadata(): Promise<AssistantStepCon
   };
 
   const delivery = [
+    "特になし",
     deliveryCounts.frozen_count > 0 ? "冷凍" : null,
     deliveryCounts.refrigerated_count > 0 ? "冷蔵" : null,
     deliveryCounts.ordinary_count > 0 ? "常温" : null,
     deliveryCounts.hour_count > 0 ? "日時指定できる" : null,
-    "こだわらない",
   ].filter((value): value is string => !!value);
 
   return [

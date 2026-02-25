@@ -13,6 +13,7 @@
 - 会話推薦APIへの `userId` 受け渡し
 - クリック履歴ベース再スコアリング
 - 推薦理由の表示（個人化由来）
+- AIエージェントおすすめ（ボタン起動・別ブロック表示）
 - 非対象（MVP外）:
 - ログインユーザ連携
 - クロスデバイス同期
@@ -116,6 +117,66 @@ const requestEnabled = body.useLlmPersonalization === true;
 const finalUseLlm = envEnabled && requestEnabled;
 ```
 
+### 4.4 AIエージェントおすすめAPI
+- 追加: `app/api/recommend/agent-personalized/route.ts`
+- 役割:
+- 現在条件（session.slots）と `userId` を受け、クリック履歴を反映した候補から「エージェントおすすめ」を返す
+- 既存の `recommendByAnswers` で取得した候補を利用し、結果は通常推薦とは別ブロック表示用に返す
+- 抽出戦略:
+- まず「クリック履歴のみ」で候補を抽出（カテゴリ/キーワード傾向）
+- クリック履歴から推定した金額レンジ（`preferredAmountRange`）で絞り込み
+- 履歴優先で0件なら現在条件（用途/予算/カテゴリ等）でフォールバック検索
+
+#### Request
+```json
+{
+  "session": {
+    "slots": {
+      "purpose": "自宅用",
+      "budget": "10,001〜20,000円",
+      "category": "魚介"
+    }
+  },
+  "topK": 10,
+  "threshold": 0.35,
+  "userId": "uuid-v4",
+  "useLlmPersonalization": true
+}
+```
+
+#### Response
+```json
+{
+  "ok": true,
+  "strategy": "history_only",
+  "agentMessage": "クリック履歴と現在条件から3件を提案します。",
+  "agentMatches": [
+    {
+      "productId": "12345",
+      "agentReason": "最近のクリック傾向（旅行・体験）に一致"
+    }
+  ],
+  "finalUseLlm": true,
+  "agentExtractionSummary": {
+    "searchStrategy": "history_only",
+    "currentConditions": ["用途: 自宅用", "予算: 10,001〜20,000円", "カテゴリ: 魚介"],
+    "personalizationSignals": [
+      "最近クリックした商品数: 5件",
+      "カテゴリ傾向: 魚介 / 旅行・体験",
+      "キーワード傾向: 海鮮 / 刺身 / 冷凍",
+      "履歴金額レンジ: 11,000〜13,000円（適用）",
+      "LLMキーワード補強: 有効（env=true かつ UIでON）"
+    ],
+    "rerankRules": [
+      "カテゴリ一致を最大 +0.12 で加点",
+      "キーワード一致を最大 +0.10 で加点",
+      "直近クリックと同一商品は -0.05 で減点"
+    ],
+    "personalizedMatchCount": 2
+  }
+}
+```
+
 ## 5. サーバ実装設計
 ### 5.1 ユーザ行動リポジトリ
 - 追加: `lib/recommend-personalization/repository.ts`
@@ -146,6 +207,7 @@ export async function getRecentClicksByUser(
 - `preferredCategories: Map<string, number>`
 - `preferredKeywords: Map<string, number>`
 - `recentProductIds: Set<string>`
+- `preferredAmountRange: { min, max, sampleCount } | null`
 - `finalUseLlm === false` の場合は頻度集計のみで構築。
 - `finalUseLlm === true` の場合はクリック商品テキストをLLM要約し、`preferredKeywords` を補強。
 
@@ -154,6 +216,7 @@ export type UserPreferenceProfile = {
   categoryWeights: Record<string, number>;
   keywordWeights: Record<string, number>;
   recentProductIds: string[];
+  preferredAmountRange: { min: number; max: number; sampleCount: number } | null;
 };
 ```
 
@@ -289,10 +352,21 @@ function trackClick(payload: ClickPayload) {
 - `personalBoost > 0` なら `あなた向け` バッジ
 - 理由文（例: `最近のクリック傾向（旅行・体験）に一致`）
 
+### 6.4 AIエージェントおすすめUI
+- `app/recommend-assistant/page.tsx` に `AIエージェントにおすすめを聞く` ボタンを追加
+- ボタン押下で `POST /api/recommend/agent-personalized` を呼び出す
+- 既存の「推薦結果」「画像ベクトル類似検索結果」とは別に「エージェントのおすすめ」ブロックを表示
+- エージェントブロック内のカードにも理由（`agentReason`）を表示
+- エージェントブロック内に「このおすすめの抽出内容」を表示
+- 表示内容は `searchStrategy` / `currentConditions` / `personalizationSignals` / `rerankRules` / `personalizedMatchCount`
+
 ## 7. テスト計画
 ### 7.1 APIテスト
 - 追加: `tests/api/recommend-events-click.test.ts`
 - 正常: UUID + productId で `200`
+- 異常: UUID不正で `400`
+- 追加: `tests/api/recommend-agent-personalized.test.ts`
+- 正常: `userId` + slots で `200`、`agentMatches` を返す
 - 異常: UUID不正で `400`
 
 ### 7.2 推薦テスト
@@ -315,8 +389,9 @@ function trackClick(payload: ClickPayload) {
 6. プロファイル生成 + 再スコア実装（ルールベース）
 7. `LLMフラグ制御` と `LLMキーワード補強` 実装（env + request）
 8. UIバッジ/理由表示
-9. テスト追加・更新
-10. lint/test 実行
+9. AIエージェントおすすめAPI + UI実装（ボタン起動・別ブロック）
+10. テスト追加・更新
+11. lint/test 実行
 
 ## 9. 受け入れ条件
 - 同一ブラウザで `userId` が維持される。
@@ -326,6 +401,7 @@ function trackClick(payload: ClickPayload) {
 - `RECOMMEND_PERSONALIZATION_LLM_ENABLED=false` の場合、`useLlmPersonalization=true` でもLLM経路に入らない。
 - `RECOMMEND_PERSONALIZATION_LLM_ENABLED=true` かつ `useLlmPersonalization=true` の場合のみLLM経路に入る。
 - LLM失敗時はエラーにせずルールベースで結果を返す。
+- `AIエージェントにおすすめを聞く` ボタン押下時に、既存結果とは別ブロックでおすすめが表示される。
 - `/chat-recommend` `/agent-recommend` `/recommend-assistant` の既存機能を壊さない。
 
 ## 10. 将来拡張

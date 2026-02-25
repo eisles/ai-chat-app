@@ -31,7 +31,18 @@ type CreateResponse = {
   error?: string;
 };
 
+type UpdateResponse = {
+  ok: boolean;
+  set?: AssistantQuestionSet;
+  error?: string;
+};
+
 type PublishResponse = {
+  ok: boolean;
+  error?: string;
+};
+
+type DeleteResponse = {
   ok: boolean;
   error?: string;
 };
@@ -83,14 +94,20 @@ export default function RecommendAssistantSettingsPage() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [publishingId, setPublishingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastSavedId, setLastSavedId] = useState<string | null>(null);
+  const [editingSetId, setEditingSetId] = useState<string | null>(null);
   const [addStepKey, setAddStepKey] = useState<AssistantStepKey | "">("");
 
   const publishedSet = useMemo(
     () => sets.find((set) => set.status === "published") ?? null,
     [sets]
+  );
+  const editingSet = useMemo(
+    () => sets.find((set) => set.id === editingSetId) ?? null,
+    [sets, editingSetId]
   );
   const availableStepKeys = useMemo(
     () =>
@@ -146,6 +163,8 @@ export default function RecommendAssistantSettingsPage() {
         throw new Error(data.error ?? "候補生成に失敗しました。");
       }
       setSteps(normalizeStepOrders(data.steps ?? []));
+      setEditingSetId(null);
+      setName("質問セット草案");
       setInfo("候補を再生成しました。");
     } catch (err) {
       setError(err instanceof Error ? err.message : "候補生成に失敗しました。");
@@ -170,22 +189,96 @@ export default function RecommendAssistantSettingsPage() {
     setError(null);
     setInfo(null);
     try {
-      const res = await fetch("/api/recommend-assistant-settings/sets", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, steps: normalizedSteps }),
-      });
-      const data = (await res.json()) as CreateResponse;
-      if (!res.ok || !data.ok || !data.set) {
-        throw new Error(data.error ?? "草案の保存に失敗しました。");
+      if (editingSetId) {
+        const res = await fetch(
+          `/api/recommend-assistant-settings/sets/${editingSetId}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, steps: normalizedSteps }),
+          }
+        );
+        const data = (await res.json()) as UpdateResponse;
+        if (!res.ok || !data.ok || !data.set) {
+          throw new Error(data.error ?? "セットの更新に失敗しました。");
+        }
+        setLastSavedId(data.set.id);
+        setInfo("セットを更新しました。");
+      } else {
+        const res = await fetch("/api/recommend-assistant-settings/sets", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, steps: normalizedSteps }),
+        });
+        const data = (await res.json()) as CreateResponse;
+        if (!res.ok || !data.ok || !data.set) {
+          throw new Error(data.error ?? "草案の保存に失敗しました。");
+        }
+        setLastSavedId(data.set.id);
+        setInfo("草案を保存しました。");
       }
-      setLastSavedId(data.set.id);
-      setInfo("草案を保存しました。");
       await refreshSets();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "草案の保存に失敗しました。");
+      setError(
+        err instanceof Error ? err.message : "草案の保存または更新に失敗しました。"
+      );
     } finally {
       setSaving(false);
+    }
+  }
+
+  function loadSetForEdit(target: AssistantQuestionSet) {
+    setEditingSetId(target.id);
+    setName(target.name);
+    setSteps(
+      normalizeStepOrders(
+        target.steps.map((step) => ({
+          ...step,
+          quickReplies: [...step.quickReplies],
+        }))
+      )
+    );
+    setLastSavedId(target.id);
+    setError(null);
+    setInfo(`v${target.version} を編集中です。`);
+  }
+
+  function cancelEditMode() {
+    setEditingSetId(null);
+    setError(null);
+    setInfo("編集モードを終了しました。");
+  }
+
+  async function deleteSet(id: string) {
+    const target = sets.find((set) => set.id === id);
+    if (!target) return;
+    if (!window.confirm(`v${target.version} ${target.name} を削除しますか？`)) {
+      return;
+    }
+
+    setDeletingId(id);
+    setError(null);
+    setInfo(null);
+    try {
+      const res = await fetch(`/api/recommend-assistant-settings/sets/${id}`, {
+        method: "DELETE",
+      });
+      const data = (await res.json()) as DeleteResponse;
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error ?? "削除に失敗しました。");
+      }
+      if (editingSetId === id) {
+        setEditingSetId(null);
+      }
+      if (lastSavedId === id) {
+        setLastSavedId(null);
+      }
+      setInfo("セットを削除しました。");
+      await refreshSets();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "削除に失敗しました。");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -250,14 +343,30 @@ export default function RecommendAssistantSettingsPage() {
             <div className="text-xs text-muted-foreground">
               候補再生成 → 編集 → 草案保存 → 公開 の順で進めます。
             </div>
+            {editingSet && (
+              <div className="text-xs text-primary">
+                編集中: v{editingSet.version} {editingSet.name}
+              </div>
+            )}
           </div>
           <div className="flex flex-wrap gap-2">
             <Button onClick={generateDraft} disabled={loading}>
               {loading ? "生成中..." : "候補再生成"}
             </Button>
             <Button onClick={saveDraft} disabled={saving}>
-              {saving ? "保存中..." : "草案保存"}
+              {saving
+                ? editingSetId
+                  ? "更新中..."
+                  : "保存中..."
+                : editingSetId
+                  ? "編集中セットを更新"
+                  : "草案保存"}
             </Button>
+            {editingSetId && (
+              <Button variant="outline" onClick={cancelEditMode} disabled={saving}>
+                編集を終了
+              </Button>
+            )}
             {lastSavedId && (
               <Button
                 variant="secondary"
@@ -408,6 +517,29 @@ export default function RecommendAssistantSettingsPage() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => loadSetForEdit(set)}
+                  >
+                    編集読み込み
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={set.status === "published" || deletingId === set.id}
+                    onClick={() => {
+                      void deleteSet(set.id);
+                    }}
+                  >
+                    {deletingId === set.id
+                      ? "削除中..."
+                      : set.status === "published"
+                        ? "公開中は削除不可"
+                        : "削除"}
+                  </Button>
                   <Button
                     type="button"
                     variant={set.status === "published" ? "secondary" : "outline"}

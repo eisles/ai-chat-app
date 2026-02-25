@@ -13,6 +13,11 @@ export type UserPreferenceProfile = {
   categoryWeights: Record<string, number>;
   keywordWeights: Record<string, number>;
   recentProductIds: string[];
+  preferredAmountRange: {
+    min: number;
+    max: number;
+    sampleCount: number;
+  } | null;
 };
 
 export type BuildProfileOptions = {
@@ -22,6 +27,7 @@ export type BuildProfileOptions = {
 
 type RawProduct = {
   name?: string | null;
+  amount?: number | string | null;
   categories?: Array<{
     category1_name?: string | null;
     category2_name?: string | null;
@@ -131,6 +137,47 @@ function collectKeywordsFromClick(click: ClickEvent): string[] {
   return [];
 }
 
+function coerceAmount(raw: RawProduct | null): number | null {
+  if (!raw) return null;
+  const value = raw.amount;
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value.replace(/,/g, ""));
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+function buildPreferredAmountRange(
+  signals: ProductSignal[]
+): UserPreferenceProfile["preferredAmountRange"] {
+  const amounts = signals
+    .map((signal) => coerceAmount(coerceRaw(signal.metadata)))
+    .filter((value): value is number => value !== null);
+
+  if (amounts.length === 0) return null;
+
+  const sorted = [...amounts].sort((a, b) => a - b);
+  const baseMin =
+    sorted.length < 4
+      ? sorted[0]
+      : sorted[Math.floor((sorted.length - 1) * 0.25)];
+  const baseMax =
+    sorted.length < 4
+      ? sorted[sorted.length - 1]
+      : sorted[Math.floor((sorted.length - 1) * 0.75)];
+  const min = Math.max(1, Math.floor(baseMin * 0.85));
+  const max = Math.max(min, Math.ceil(baseMax * 1.15));
+
+  return {
+    min,
+    max,
+    sampleCount: sorted.length,
+  };
+}
+
 function collectCategoryWeights(signals: ProductSignal[]): Record<string, number> {
   const weights: Record<string, number> = {};
   signals.forEach((signal) => {
@@ -199,6 +246,7 @@ export async function buildUserPreferenceProfile(
       categoryWeights,
       keywordWeights,
       recentProductIds: productIds,
+      preferredAmountRange: buildPreferredAmountRange(signals),
     };
 
     if (options.useLlmPersonalization) {
@@ -212,6 +260,7 @@ export async function buildUserPreferenceProfile(
             categoryWeights,
             keywordWeights: merged,
             recentProductIds: productIds,
+            preferredAmountRange: baseProfile.preferredAmountRange,
           };
         } catch {
           return baseProfile;

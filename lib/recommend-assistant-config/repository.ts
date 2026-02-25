@@ -70,16 +70,29 @@ function normalizeQuickReplies(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
 }
 
+function normalizeDeliveryQuickReplies(values: string[]): string[] {
+  const normalized = values.map((value) =>
+    value.trim() === "こだわらない" ? "特になし" : value.trim()
+  );
+  const deduped = Array.from(new Set(normalized.filter((value) => value.length > 0)));
+  const withoutNone = deduped.filter((value) => value !== "特になし");
+  return ["特になし", ...withoutNone];
+}
+
 function normalizeStep(value: unknown): AssistantStepConfig | null {
   if (!value || typeof value !== "object") return null;
   const step = value as Partial<AssistantStepConfig>;
   if (!step.key || !isAssistantStepKey(step.key)) return null;
   if (typeof step.question !== "string" || step.question.trim().length === 0) return null;
   const order = typeof step.order === "number" ? step.order : 0;
+  const quickReplies = normalizeQuickReplies(step.quickReplies);
   return {
     key: step.key,
     question: step.question,
-    quickReplies: normalizeQuickReplies(step.quickReplies),
+    quickReplies:
+      step.key === "delivery"
+        ? normalizeDeliveryQuickReplies(quickReplies)
+        : quickReplies,
     optional: Boolean(step.optional),
     enabled: step.enabled !== false,
     order,
@@ -158,6 +171,47 @@ export async function createDraftSet(input: {
   `) as DbRow[];
 
   return mapRow(rows[0]);
+}
+
+export async function updateQuestionSet(
+  id: string,
+  input: {
+    name: string;
+    steps: AssistantStepConfig[];
+    meta?: Record<string, unknown>;
+  }
+): Promise<AssistantQuestionSet | null> {
+  await ensureQuestionSetSchema();
+  const db = getDb();
+  const rows = (await db`
+    update recommend_assistant_question_sets
+    set
+      name = ${input.name},
+      steps = ${JSON.stringify(input.steps)}::jsonb,
+      meta = ${JSON.stringify(input.meta ?? {})}::jsonb,
+      updated_at = now()
+    where id = ${id}
+    returning *
+  `) as DbRow[];
+
+  return rows[0] ? mapRow(rows[0]) : null;
+}
+
+export async function deleteQuestionSet(
+  id: string,
+  options?: { allowPublished?: boolean }
+): Promise<boolean> {
+  await ensureQuestionSetSchema();
+  const db = getDb();
+  const allowPublished = options?.allowPublished === true;
+  const rows = (await db`
+    delete from recommend_assistant_question_sets
+    where id = ${id}
+      and (${allowPublished} or status <> 'published')
+    returning id
+  `) as Array<{ id: string }>;
+
+  return rows.length > 0;
 }
 
 export async function publishSet(id: string): Promise<void> {

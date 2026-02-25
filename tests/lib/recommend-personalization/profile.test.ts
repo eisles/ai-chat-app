@@ -49,6 +49,7 @@ describe("buildUserPreferenceProfile", () => {
           raw: {
             category_name: "海鮮",
             name: "海鮮詰め合わせ",
+            amount: 12000,
           },
         },
       },
@@ -59,6 +60,7 @@ describe("buildUserPreferenceProfile", () => {
           raw: {
             category_name: "肉",
             name: "黒毛和牛",
+            amount: 18000,
           },
         },
       },
@@ -78,6 +80,11 @@ describe("buildUserPreferenceProfile", () => {
       "海鮮": 2,
       "自宅用": 1,
     });
+    expect(profile?.preferredAmountRange).not.toBeNull();
+    expect(profile?.preferredAmountRange?.min).toBeGreaterThan(0);
+    expect(profile?.preferredAmountRange?.max).toBeGreaterThan(
+      profile?.preferredAmountRange?.min ?? 0
+    );
     expect(generatePreferenceKeywordsByLlm).not.toHaveBeenCalled();
   });
 
@@ -99,6 +106,7 @@ describe("buildUserPreferenceProfile", () => {
         metadata: {
           raw: {
             category_name: "肉",
+            amount: 25000,
           },
         },
       },
@@ -114,5 +122,6 @@ describe("buildUserPreferenceProfile", () => {
     expect(profile?.keywordWeights).toMatchObject({
       "高級": 2,
     });
+    expect(profile?.preferredAmountRange).not.toBeNull();
   });
 });
