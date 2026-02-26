@@ -873,6 +873,10 @@ export default function RecommendAssistantPage() {
           />
           LLM個人化を使う（実験）
         </label>
+        <div className="text-xs text-muted-foreground">
+          有効条件: `RECOMMEND_PERSONALIZATION_LLM_ENABLED=true` かつ
+          画面でONのときのみ。失敗時は自動でルールベースへフォールバックします。
+        </div>
 
         <form className="flex flex-col gap-2 sm:flex-row" onSubmit={handleSubmit}>
             <Input
