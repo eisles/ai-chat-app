@@ -71,18 +71,27 @@ export default function ProductImagesVectorizeSearchPage() {
   const [displayMode, setDisplayMode] = useState<"debug" | "product">(
     "product",
   );
+  const [activeQueryImageUrl, setActiveQueryImageUrl] = useState<string | null>(
+    null,
+  );
 
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
+  async function runSearch(targetUrl: string) {
+    const trimmed = targetUrl.trim();
+    if (!trimmed) {
+      setResult({ ok: false, error: "画像URLが必要です。" });
+      return;
+    }
+    setImageUrl(trimmed);
     setIsSubmitting(true);
     setResult(null);
+    setActiveQueryImageUrl(trimmed);
 
     try {
       const res = await fetch("/api/vectorize-product-images/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          imageUrl: imageUrl || undefined,
+          imageUrl: trimmed || undefined,
           limit: limit ? Number(limit) : undefined,
         }),
       });
@@ -105,6 +114,11 @@ export default function ProductImagesVectorizeSearchPage() {
     } finally {
       setIsSubmitting(false);
     }
+  }
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    await runSearch(imageUrl);
   }
 
   return (
@@ -213,13 +227,20 @@ export default function ProductImagesVectorizeSearchPage() {
                           className="rounded-lg border bg-background/70 p-3"
                           key={row.id}
                         >
-                          <div className="aspect-square overflow-hidden rounded-md bg-muted/50">
-                            <img
-                              alt="result"
-                              className="h-full w-full object-cover"
-                              loading="lazy"
-                              src={row.image_url}
-                            />
+                          <div className="relative aspect-square overflow-hidden rounded-md bg-muted/50">
+                            {row.image_url ? (
+                              <Image
+                                src={row.image_url}
+                                alt="result"
+                                fill
+                                className="object-cover"
+                                sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+                              />
+                            ) : (
+                              <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
+                                画像なし
+                              </div>
+                            )}
                           </div>
                           <div className="mt-2 space-y-1 text-xs text-muted-foreground">
                             <div>distance: {row.distance.toFixed(6)}</div>
@@ -245,6 +266,11 @@ export default function ProductImagesVectorizeSearchPage() {
                           row.image_url,
                         );
                         const displayImage = image ?? row.image_url;
+                        const canSearch =
+                          typeof row.image_url === "string" &&
+                          row.image_url.trim().length > 0;
+                        const isSearchingThisImage =
+                          isSubmitting && activeQueryImageUrl === row.image_url;
 
                         return (
                           <div
@@ -306,6 +332,24 @@ export default function ProductImagesVectorizeSearchPage() {
                               <div className="mt-1 text-xs text-muted-foreground">
                                 距離: {row.distance.toFixed(4)}
                               </div>
+
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="mt-3 w-full"
+                                disabled={!canSearch || isSubmitting}
+                                onClick={() => {
+                                  if (!canSearch) return;
+                                  void runSearch(row.image_url);
+                                }}
+                              >
+                                {!canSearch
+                                  ? "画像がないため検索不可"
+                                  : isSearchingThisImage
+                                    ? "類似画像を検索中..."
+                                    : "この画像に似た商品を検索"}
+                              </Button>
                             </div>
                           </div>
                         );
