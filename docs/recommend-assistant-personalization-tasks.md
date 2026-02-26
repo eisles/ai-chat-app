@@ -23,6 +23,7 @@
 - [x] 保存済みセット削除を設定画面に追加（公開中セットは削除不可）
 - [x] 設定APIに `PATCH/DELETE /api/recommend-assistant-settings/sets/{id}` を追加
 - [x] LLM個人化の有効条件（env+UI）を `recommend-assistant` 画面に明記
+- [x] LLM個人化を有効にした場合の検索仕様を `recommend-assistant` 画面に明記
 - [x] テスト追加/更新（`tests/api/recommend-events-click.test.ts` ほか）
 - [x] lint/test 実行
 

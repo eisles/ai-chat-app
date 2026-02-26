@@ -877,6 +877,17 @@ export default function RecommendAssistantPage() {
           有効条件: `RECOMMEND_PERSONALIZATION_LLM_ENABLED=true` かつ
           画面でONのときのみ。失敗時は自動でルールベースへフォールバックします。
         </div>
+        <ul className="mt-1 space-y-1 text-xs text-muted-foreground">
+          <li>
+            クリック履歴からカテゴリ/キーワード傾向を抽出し、LLMでキーワード補強します
+          </li>
+          <li>
+            個人化スコアに反映（カテゴリ一致 +0.12、キーワード一致 最大+0.10、
+            直近クリック同一商品 -0.05）
+          </li>
+          <li>検索の基礎条件（予算/カテゴリ/配送）は変更しません</li>
+          <li>AIエージェントの提案文はLLMで1文生成します（失敗時は固定文）</li>
+        </ul>
 
         <form className="flex flex-col gap-2 sm:flex-row" onSubmit={handleSubmit}>
             <Input
