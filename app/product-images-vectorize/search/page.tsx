@@ -2,27 +2,47 @@
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import Image from "next/image";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 // metadata.rawから商品情報を取得
 function extractProductInfo(metadata: Record<string, unknown> | null): {
   name: string | null;
   image: string | null;
+  description: string | null;
 } {
   if (!metadata) {
-    return { name: null, image: null };
+    return { name: null, image: null, description: null };
   }
 
   const raw = metadata.raw as Record<string, unknown> | undefined;
   if (!raw) {
-    return { name: null, image: null };
+    return { name: null, image: null, description: null };
   }
+
+  const descriptionCandidates = [
+    raw.catchphrase,
+    raw.description,
+    raw.shipping_text,
+    raw.application_text,
+    raw.bulk_text,
+  ];
+  const description = descriptionCandidates.find(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
 
   return {
     name: typeof raw.name === "string" ? raw.name : null,
     image: typeof raw.image === "string" ? raw.image : null,
+    description: description ?? null,
   };
 }
 
@@ -46,6 +66,16 @@ type ApiResult = {
   results?: ResultRow[];
   error?: string;
 };
+
+type SearchHistoryItem = {
+  id: string;
+  imageUrl: string;
+  searchedAt: string;
+  resultCount: number | null;
+};
+
+const SEARCH_HISTORY_KEY = "product_images_vectorize_search_history";
+const SEARCH_HISTORY_LIMIT = 12;
 
 function buildProductUrl(
   productId: string | null,
@@ -74,6 +104,76 @@ export default function ProductImagesVectorizeSearchPage() {
   const [activeQueryImageUrl, setActiveQueryImageUrl] = useState<string | null>(
     null,
   );
+  const [searchHistory, setSearchHistory] = useState<SearchHistoryItem[]>([]);
+  const [modalItem, setModalItem] = useState<ResultRow | null>(null);
+
+  const modalInfo = useMemo(
+    () => (modalItem ? extractProductInfo(modalItem.metadata ?? null) : null),
+    [modalItem],
+  );
+  const modalDisplayName = useMemo(() => {
+    if (!modalItem) return null;
+    if (modalInfo?.name) return modalInfo.name;
+    if (modalItem.product_id) return `商品ID: ${modalItem.product_id}`;
+    return `ID: ${modalItem.id}`;
+  }, [modalInfo, modalItem]);
+  const modalImage = modalInfo?.image ?? modalItem?.image_url ?? null;
+  const modalDescription = modalInfo?.description ?? "説明が登録されていません。";
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const raw = window.localStorage.getItem(SEARCH_HISTORY_KEY);
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as SearchHistoryItem[];
+      if (Array.isArray(parsed)) {
+        setSearchHistory(parsed);
+      }
+    } catch {
+      // noop
+    }
+  }, []);
+
+  function createHistoryId(): string {
+    if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+      return crypto.randomUUID();
+    }
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  function updateSearchHistory(
+    targetUrl: string,
+    resultCount: number | null,
+  ) {
+    const trimmed = targetUrl.trim();
+    if (!trimmed) return;
+    const nextItem: SearchHistoryItem = {
+      id: createHistoryId(),
+      imageUrl: trimmed,
+      searchedAt: new Date().toISOString(),
+      resultCount,
+    };
+    setSearchHistory((prev) => {
+      const nextHistory = [
+        nextItem,
+        ...prev.filter((item) => item.imageUrl !== trimmed),
+      ].slice(0, SEARCH_HISTORY_LIMIT);
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(
+          SEARCH_HISTORY_KEY,
+          JSON.stringify(nextHistory),
+        );
+      }
+      return nextHistory;
+    });
+  }
+
+  function clearSearchHistory() {
+    setSearchHistory([]);
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(SEARCH_HISTORY_KEY);
+    }
+  }
 
   async function runSearch(targetUrl: string) {
     const trimmed = targetUrl.trim();
@@ -106,6 +206,9 @@ export default function ProductImagesVectorizeSearchPage() {
         };
       }
       setResult(data);
+      if (data.ok) {
+        updateSearchHistory(trimmed, data.results?.length ?? 0);
+      }
     } catch (error) {
       setResult({
         ok: false,
@@ -174,6 +277,62 @@ export default function ProductImagesVectorizeSearchPage() {
         </form>
       </Card>
 
+      <Card className="border bg-card/60 p-4 shadow-sm sm:p-6">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-medium">検索履歴</div>
+            <div className="text-xs text-muted-foreground">
+              最近の画像URL検索を再実行できます。
+            </div>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={clearSearchHistory}
+            disabled={searchHistory.length === 0}
+          >
+            履歴をクリア
+          </Button>
+        </div>
+        {searchHistory.length === 0 ? (
+          <div className="mt-3 rounded-md bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+            まだ検索履歴がありません。
+          </div>
+        ) : (
+          <div className="mt-3 space-y-2 text-sm">
+            {searchHistory.map((item) => (
+              <div
+                key={item.id}
+                className="flex flex-col gap-2 rounded-md border bg-background/70 p-3 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="min-w-0 space-y-1">
+                  <div className="truncate text-sm font-medium">
+                    {item.imageUrl}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {new Date(item.searchedAt).toLocaleString("ja-JP")}
+                    {item.resultCount != null
+                      ? ` / 表示件数: ${item.resultCount}件`
+                      : ""}
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    void runSearch(item.imageUrl);
+                  }}
+                >
+                  再検索
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
       {result && (
         <Card className="border bg-card/60 p-4 shadow-sm sm:p-6">
           <h2 className="text-lg font-semibold">検索結果</h2>
@@ -187,6 +346,10 @@ export default function ProductImagesVectorizeSearchPage() {
                 <div>vectorization time: {result.embeddingDurationMs} ms</div>
                 <div className="break-all">
                   query imageUrl: {result.queryImageUrl}
+                </div>
+                <div>
+                  表示件数: {result.results?.length ?? 0}件 / 設定件数:{" "}
+                  {limit ? Number(limit) : 0}件
                 </div>
               </div>
 
@@ -336,8 +499,18 @@ export default function ProductImagesVectorizeSearchPage() {
                               <Button
                                 type="button"
                                 size="sm"
-                                variant="outline"
+                                variant="secondary"
                                 className="mt-3 w-full"
+                                onClick={() => setModalItem(row)}
+                              >
+                                画像と説明をみる
+                              </Button>
+
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="mt-2 w-full"
                                 disabled={!canSearch || isSubmitting}
                                 onClick={() => {
                                   if (!canSearch) return;
@@ -370,6 +543,49 @@ export default function ProductImagesVectorizeSearchPage() {
           )}
         </Card>
       )}
+
+      <Dialog open={!!modalItem} onOpenChange={() => setModalItem(null)}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{modalDisplayName ?? "商品詳細"}</DialogTitle>
+            <DialogDescription>
+              画像と説明文を確認できます。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="relative aspect-[4/3] overflow-hidden rounded-md border bg-muted">
+              {modalImage ? (
+                <Image
+                  src={modalImage}
+                  alt={modalDisplayName ?? "商品画像"}
+                  fill
+                  className="object-cover"
+                  sizes="(max-width: 640px) 100vw, 720px"
+                />
+              ) : (
+                <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
+                  画像なし
+                </div>
+              )}
+            </div>
+            <div className="space-y-2 text-sm">
+              <div className="text-muted-foreground">
+                商品ID: {modalItem?.product_id ?? "-"} / 市町村コード:{" "}
+                {modalItem?.city_code ?? "-"}
+              </div>
+              <div className="text-muted-foreground">
+                金額:{" "}
+                {modalItem?.amount != null
+                  ? `${modalItem.amount.toLocaleString()}円`
+                  : "金額未設定"}
+              </div>
+              <div className="whitespace-pre-wrap leading-relaxed">
+                {modalDescription}
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
