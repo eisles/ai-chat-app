@@ -6,6 +6,7 @@ import {
   recommendByAnswers,
   type RecommendByAnswersInput,
 } from "@/lib/recommend/by-answers-engine";
+import { insertRecommendSearchEvent } from "@/lib/recommend-personalization/repository";
 import { DEFAULT_QUESTION_SET } from "@/lib/recommend-assistant-config/default-config";
 import { getPublishedQuestionSet } from "@/lib/recommend-assistant-config/repository";
 import type { AssistantStepConfig } from "@/lib/recommend-assistant-config/types";
@@ -45,6 +46,7 @@ type Payload = {
   session?: ConversationSession;
   topK?: unknown;
   threshold?: unknown;
+  allowCategoryFallback?: unknown;
   selectedStepKey?: unknown;
   selectedValue?: unknown;
   userId?: unknown;
@@ -113,6 +115,44 @@ function parseUserId(value: unknown): string | null {
 
 function parseUseLlmPersonalization(value: unknown): boolean {
   return value === true;
+}
+
+function parseAllowCategoryFallback(value: unknown): boolean {
+  return value !== false;
+}
+
+async function recordFallbackAppliedEvent(params: {
+  userId: string | null;
+  topK: number;
+  threshold: number;
+  slots: SlotState;
+  allowCategoryFallback: boolean;
+  fallbackInfo: {
+    reason: "category_no_match" | null;
+    relaxedConditions: string[];
+    strictMatchCount: number;
+    relaxedMatchCount: number;
+  };
+}) {
+  try {
+    await insertRecommendSearchEvent({
+      userId: params.userId,
+      source: "recommend-assistant",
+      eventType: "recommend_fallback_applied",
+      metadata: {
+        reason: params.fallbackInfo.reason,
+        relaxedConditions: params.fallbackInfo.relaxedConditions,
+        strictMatchCount: params.fallbackInfo.strictMatchCount,
+        relaxedMatchCount: params.fallbackInfo.relaxedMatchCount,
+        topK: params.topK,
+        threshold: params.threshold,
+        slots: params.slots,
+        allowCategoryFallback: params.allowCategoryFallback,
+      },
+    });
+  } catch {
+    // イベント記録失敗は推薦APIの失敗にしない
+  }
 }
 
 function applySelectedAnswer(extracted: SlotState, stepKey: ConversationStepKey, value: string) {
@@ -238,6 +278,7 @@ export async function POST(req: Request) {
 
     const topK = parseTopK(body.topK, DEFAULT_TOP_K);
     const threshold = parseThreshold(body.threshold, DEFAULT_THRESHOLD);
+    const allowCategoryFallback = parseAllowCategoryFallback(body.allowCategoryFallback);
     const input: RecommendByAnswersInput = {
       budget: slots.budget,
       category: slots.category,
@@ -248,10 +289,21 @@ export async function POST(req: Request) {
       cityCode: slots.cityCode,
       topK,
       threshold,
+      allowCategoryFallback,
       userId: userId ?? undefined,
       useLlmPersonalization: finalUseLlm,
     };
     const result = await recommendByAnswers(input);
+    if (result.fallbackInfo.applied) {
+      await recordFallbackAppliedEvent({
+        userId,
+        topK,
+        threshold,
+        slots,
+        allowCategoryFallback,
+        fallbackInfo: result.fallbackInfo,
+      });
+    }
 
     return Response.json({
       ok: true,
@@ -260,6 +312,7 @@ export async function POST(req: Request) {
       assistantMessage: "条件が揃いました。おすすめ結果を表示します。",
       queryText: result.queryText,
       budgetRange: result.budgetRange,
+      fallbackInfo: result.fallbackInfo,
       matches: result.matches,
     });
   } catch (error) {

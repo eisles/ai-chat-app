@@ -118,6 +118,7 @@ type ApiResponse = {
   queryText?: string;
   matches?: Match[];
   budgetRange?: BudgetRange | null;
+  fallbackInfo?: FallbackInfo;
   error?: string;
 };
 
@@ -162,6 +163,15 @@ type Message = {
   text: string;
 };
 
+type FallbackInfo = {
+  enabled: boolean;
+  applied: boolean;
+  reason: "category_no_match" | null;
+  relaxedConditions: string[];
+  strictMatchCount: number;
+  relaxedMatchCount: number;
+};
+
 type ClickPayload = {
   userId: string;
   productId: string;
@@ -174,6 +184,7 @@ type ClickPayload = {
 const DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT = 20;
 const MIN_SIMILAR_IMAGE_RESULT_LIMIT = 1;
 const MAX_SIMILAR_IMAGE_RESULT_LIMIT = 100;
+const AUTO_RELAX_STORAGE_KEY = "recommend_assistant_auto_relax";
 
 const FIELD_LABELS: Record<string, string> = {
   purpose: "用途",
@@ -441,6 +452,7 @@ function createInitialSession(): ConversationSession {
 }
 
 export default function RecommendAssistantPage() {
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const defaultInitialState = buildInitialState(DEFAULT_QUESTION_SET.steps);
   const [activeSteps, setActiveSteps] = useState<AssistantStepConfig[]>(
     DEFAULT_QUESTION_SET.steps
@@ -464,6 +476,8 @@ export default function RecommendAssistantPage() {
   const [displayMode, setDisplayMode] = useState<"debug" | "product">("product");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [allowCategoryFallback, setAllowCategoryFallback] = useState(true);
+  const [fallbackInfo, setFallbackInfo] = useState<FallbackInfo | null>(null);
   const [hasInteracted, setHasInteracted] = useState(false);
   const [recommendUserId, setRecommendUserId] = useState<string | null>(null);
   const [useLlmPersonalization, setUseLlmPersonalization] = useState(false);
@@ -509,6 +523,7 @@ export default function RecommendAssistantPage() {
     setQuickReplies(initialState.quickReplies);
     setDisplayMode("product");
     setError(null);
+    setFallbackInfo(null);
   }, []);
 
   const clearSimilarImageResults = useCallback(() => {
@@ -559,6 +574,30 @@ export default function RecommendAssistantPage() {
   }, []);
 
   useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(AUTO_RELAX_STORAGE_KEY);
+      if (saved === "false") {
+        setAllowCategoryFallback(false);
+      } else if (saved === "true") {
+        setAllowCategoryFallback(true);
+      }
+    } catch {
+      // localStorage読取失敗時はデフォルト値を使う
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        AUTO_RELAX_STORAGE_KEY,
+        allowCategoryFallback ? "true" : "false"
+      );
+    } catch {
+      // localStorage書込失敗時は無視
+    }
+  }, [allowCategoryFallback]);
+
+  useEffect(() => {
     if (similarImageSearchRequestId <= 0) return;
     const frameId = requestAnimationFrame(() => {
       similarImageResultAnchorRef.current?.scrollIntoView({
@@ -585,17 +624,26 @@ export default function RecommendAssistantPage() {
 
   async function submitMessage(
     rawText: string,
-    options?: { selectedStepKey?: ConversationStepKey | null }
+    options?: {
+      selectedStepKey?: ConversationStepKey | null;
+      allowCategoryFallbackOverride?: boolean;
+      appendUserMessage?: boolean;
+    }
   ) {
     if (isSubmitting) return;
 
+    const shouldAppendUserMessage = options?.appendUserMessage !== false;
     const userText = rawText.trim();
     if (!userText) return;
 
-    setInput("");
+    if (shouldAppendUserMessage) {
+      setInput("");
+    }
     setError(null);
     setHasInteracted(true);
-    setMessages((prev) => [...prev, { role: "user", text: userText }]);
+    if (shouldAppendUserMessage) {
+      setMessages((prev) => [...prev, { role: "user", text: userText }]);
+    }
     setIsSubmitting(true);
 
     try {
@@ -609,6 +657,8 @@ export default function RecommendAssistantPage() {
           threshold: threshold ? Number(threshold) : undefined,
           selectedStepKey: options?.selectedStepKey ?? undefined,
           selectedValue: options?.selectedStepKey ? userText : undefined,
+          allowCategoryFallback:
+            options?.allowCategoryFallbackOverride ?? allowCategoryFallback,
           userId: recommendUserId ?? undefined,
           useLlmPersonalization,
         }),
@@ -640,6 +690,7 @@ export default function RecommendAssistantPage() {
       if (data.action === "recommend") {
         setMatches(data.matches ?? []);
         setQueryText(data.queryText ?? null);
+        setFallbackInfo(data.fallbackInfo ?? null);
         setNextQuestionKey(null);
         setQuickReplies([]);
         setMissingKeys([]);
@@ -654,6 +705,7 @@ export default function RecommendAssistantPage() {
       } else {
         setMatches([]);
         setQueryText(null);
+        setFallbackInfo(null);
         setHasAgentRequested(false);
         setAgentMatches([]);
         setAgentMessage(null);
@@ -665,6 +717,7 @@ export default function RecommendAssistantPage() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
+      setFallbackInfo(null);
       setMessages((prev) => [
         ...prev,
         { role: "assistant", text: "エラーが発生しました。条件をもう一度教えてください。" },
@@ -783,6 +836,26 @@ export default function RecommendAssistantPage() {
     await submitMessage(input);
   }
 
+  async function retryWithStrictCategory() {
+    await submitMessage("厳密条件で再検索", {
+      allowCategoryFallbackOverride: false,
+      appendUserMessage: false,
+    });
+  }
+
+  function promptCategoryChange() {
+    setNextQuestionKey("category");
+    setQuickReplies(getQuickRepliesForKey(activeSteps, "category"));
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: "assistant",
+        text: "カテゴリを変更して再検索できます。カテゴリを入力または選択してください。",
+      },
+    ]);
+    inputRef.current?.focus();
+  }
+
   function resetConversation() {
     if (isSubmitting) return;
     setHasInteracted(false);
@@ -863,6 +936,7 @@ export default function RecommendAssistantPage() {
           <li>カテゴリ候補: 既存 `metadata` から抽出した頻出カテゴリを優先表示</li>
           <li>検索件数（`topK`）と類似度しきい値（`threshold`）は画面で調整可能</li>
           <li>初期値: `topK=10` / `threshold=0.35`</li>
+          <li>カテゴリ0件時の自動条件緩和はトグルでON/OFF可能（初期ON、localStorage保存）</li>
           <li>予算フィルタ: 予算レンジに一致する金額のみを表示</li>
           <li>カテゴリフィルタ: 商品カテゴリに入力カテゴリが含まれるものを優先</li>
           <li>配送フィルタ: 指定された配送条件をすべて満たす商品のみ表示</li>
@@ -950,33 +1024,42 @@ export default function RecommendAssistantPage() {
                 placeholder="0.35"
               />
             </div>
-          <div className="space-y-1">
-            <div className="text-xs text-muted-foreground">画像類似件数 (`limit`)</div>
-            <Input
-              type="number"
-              min={MIN_SIMILAR_IMAGE_RESULT_LIMIT}
-              max={MAX_SIMILAR_IMAGE_RESULT_LIMIT}
-              step={1}
-              value={similarImageLimit}
-              onChange={(event) => setSimilarImageLimit(event.target.value)}
-              placeholder={String(DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT)}
-            />
+            <div className="space-y-1">
+              <div className="text-xs text-muted-foreground">画像類似件数 (`limit`)</div>
+              <Input
+                type="number"
+                min={MIN_SIMILAR_IMAGE_RESULT_LIMIT}
+                max={MAX_SIMILAR_IMAGE_RESULT_LIMIT}
+                step={1}
+                value={similarImageLimit}
+                onChange={(event) => setSimilarImageLimit(event.target.value)}
+                placeholder={String(DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT)}
+              />
+            </div>
           </div>
-        </div>
-        <label className="flex items-center gap-2 text-xs text-muted-foreground">
-          <input
-            type="checkbox"
-            className="h-4 w-4 accent-primary"
-            checked={useLlmPersonalization}
-            onChange={(event) => setUseLlmPersonalization(event.target.checked)}
-          />
-          LLM個人化を使う（実験）
-        </label>
-        <div className="text-xs text-muted-foreground">
-          有効条件: `RECOMMEND_PERSONALIZATION_LLM_ENABLED=true` かつ
-          画面でONのときのみ。失敗時は自動でルールベースへフォールバックします。
-        </div>
-        <ul className="mt-1 space-y-1 text-xs text-muted-foreground">
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              className="h-4 w-4 accent-primary"
+              checked={allowCategoryFallback}
+              onChange={(event) => setAllowCategoryFallback(event.target.checked)}
+            />
+            自動で条件緩和する
+          </label>
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              className="h-4 w-4 accent-primary"
+              checked={useLlmPersonalization}
+              onChange={(event) => setUseLlmPersonalization(event.target.checked)}
+            />
+            LLM個人化を使う（実験）
+          </label>
+          <div className="text-xs text-muted-foreground">
+            有効条件: `RECOMMEND_PERSONALIZATION_LLM_ENABLED=true` かつ
+            画面でONのときのみ。失敗時は自動でルールベースへフォールバックします。
+          </div>
+          <ul className="mt-1 space-y-1 text-xs text-muted-foreground">
           <li>
             使うと: クリック履歴に近い商品が上位に来やすくなり、順位が変わります
           </li>
@@ -994,6 +1077,7 @@ export default function RecommendAssistantPage() {
 
         <form className="flex flex-col gap-2 sm:flex-row" onSubmit={handleSubmit}>
             <Input
+              ref={inputRef}
               value={input}
               onChange={(event) => setInput(event.target.value)}
               placeholder="例: 1万円前後で魚介、贈り物用"
@@ -1068,6 +1152,40 @@ export default function RecommendAssistantPage() {
             </div>
           )}
         </div>
+
+        {fallbackInfo?.applied && (
+          <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+            <div>
+              カテゴリに一致する商品がなかったため、カテゴリ条件を緩和して表示しています。
+            </div>
+            <div className="mt-2 text-xs">
+              緩和条件: カテゴリ / 厳密一致件数: {fallbackInfo.strictMatchCount}件 / 緩和後件数:{" "}
+              {fallbackInfo.relaxedMatchCount}件
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={isSubmitting}
+                onClick={() => {
+                  void retryWithStrictCategory();
+                }}
+              >
+                厳密条件で再検索
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={isSubmitting}
+                onClick={promptCategoryChange}
+              >
+                カテゴリを変更
+              </Button>
+            </div>
+          </div>
+        )}
 
         {hasConversationMatches ? (
           displayMode === "debug" ? (

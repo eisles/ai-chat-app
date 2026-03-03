@@ -6,6 +6,7 @@ import {
   recommendByAnswers,
   type RecommendByAnswersInput,
 } from "@/lib/recommend/by-answers-engine";
+import { insertRecommendSearchEvent } from "@/lib/recommend-personalization/repository";
 
 export const runtime = "nodejs";
 
@@ -28,7 +29,12 @@ type RecommendPayload = {
   cityCode?: string;
   topK?: unknown;
   threshold?: unknown;
+  allowCategoryFallback?: unknown;
 };
+
+function parseAllowCategoryFallback(value: unknown): boolean {
+  return value !== false;
+}
 
 function errorResponse(error: unknown) {
   if (error instanceof ApiError) {
@@ -64,17 +70,48 @@ export async function POST(req: Request) {
 
     const topK = parseTopK(payload.topK);
     const threshold = parseThreshold(payload.threshold);
+    const allowCategoryFallback = parseAllowCategoryFallback(payload.allowCategoryFallback);
     const result = await recommendByAnswers({
       ...baseInput,
       topK,
       threshold,
       queryText,
+      allowCategoryFallback,
     });
+    if (result.fallbackInfo.applied) {
+      try {
+        await insertRecommendSearchEvent({
+          source: "recommend-by-answers-api",
+          eventType: "recommend_fallback_applied",
+          metadata: {
+            reason: result.fallbackInfo.reason,
+            relaxedConditions: result.fallbackInfo.relaxedConditions,
+            strictMatchCount: result.fallbackInfo.strictMatchCount,
+            relaxedMatchCount: result.fallbackInfo.relaxedMatchCount,
+            topK,
+            threshold,
+            slots: {
+              budget: baseInput.budget ?? null,
+              category: baseInput.category ?? null,
+              purpose: baseInput.purpose ?? null,
+              delivery: baseInput.delivery ?? null,
+              allergen: baseInput.allergen ?? null,
+              prefecture: baseInput.prefecture ?? null,
+              cityCode: baseInput.cityCode ?? null,
+            },
+            allowCategoryFallback,
+          },
+        });
+      } catch {
+        // イベント記録失敗は推薦APIの失敗にしない
+      }
+    }
 
     return Response.json({
       ok: true,
       queryText: result.queryText,
       budgetRange: result.budgetRange,
+      fallbackInfo: result.fallbackInfo,
       matches: result.matches,
     });
   } catch (error) {
