@@ -1,6 +1,10 @@
 import { assertOpenAIError } from "@/lib/image-text-search";
 import { createCompletion, LLMProviderError } from "@/lib/llm-providers";
 import {
+  agentResponseSchema,
+  type AgentSearchStrategy,
+} from "@/lib/recommend-agent/schema";
+import {
   parseThreshold,
   parseTopK,
   recommendByAnswers,
@@ -31,11 +35,6 @@ type Payload = {
 type AgentMatch = RecommendByAnswersResult["matches"][number] & {
   agentReason: string;
 };
-
-type AgentSearchStrategy =
-  | "history_only"
-  | "current_conditions_fallback"
-  | "current_conditions_only";
 
 type AgentExtractionSummary = {
   searchStrategy: AgentSearchStrategy;
@@ -411,7 +410,7 @@ export async function POST(req: Request) {
       agentMatches,
     });
 
-    return Response.json({
+    const payload = {
       ok: true,
       finalUseLlm,
       strategy,
@@ -419,7 +418,17 @@ export async function POST(req: Request) {
       agentMessage: llmMessage ?? buildFallbackAgentMessage(agentMatches, strategy),
       agentMatches,
       agentExtractionSummary,
-    });
+    };
+
+    const parsed = agentResponseSchema.safeParse(payload);
+    if (!parsed.success) {
+      return Response.json(
+        { ok: false, error: "agent response schema validation failed" },
+        { status: 500 }
+      );
+    }
+
+    return Response.json(parsed.data);
   } catch (error) {
     return errorResponse(error);
   }
