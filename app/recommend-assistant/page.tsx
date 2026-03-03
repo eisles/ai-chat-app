@@ -68,6 +68,22 @@ type BudgetRange = {
   max: number | null;
 };
 
+type RawCategoryEntry = {
+  category1_name?: string | null;
+  category2_name?: string | null;
+  category3_name?: string | null;
+};
+
+type RawProductForCategory = {
+  categories?: RawCategoryEntry[] | null;
+  category?: string | null;
+  category_name?: string | null;
+  genre?: string | null;
+  genre_name?: string | null;
+  product_type?: string | null;
+  item_type?: string | null;
+};
+
 type Match = {
   id: string;
   productId: string;
@@ -233,9 +249,59 @@ function parseBudgetRange(budget: string | undefined): BudgetRange | null {
   return null;
 }
 
+function normalizeCategoryText(value: string) {
+  return value.trim().toLowerCase().replace(/[\s・/／、,]/g, "");
+}
+
+function coerceRawProductForCategory(
+  metadata: Record<string, unknown> | null
+): RawProductForCategory | null {
+  if (!metadata || typeof metadata !== "object") return null;
+  const raw = metadata.raw;
+  if (!raw || typeof raw !== "object") return null;
+  return raw as RawProductForCategory;
+}
+
+function collectCategoryCandidates(raw: RawProductForCategory): string[] {
+  const candidates: string[] = [];
+  if (Array.isArray(raw.categories)) {
+    raw.categories.forEach((entry) => {
+      if (entry.category1_name) candidates.push(entry.category1_name);
+      if (entry.category2_name) candidates.push(entry.category2_name);
+      if (entry.category3_name) candidates.push(entry.category3_name);
+    });
+  }
+  if (raw.category) candidates.push(raw.category);
+  if (raw.category_name) candidates.push(raw.category_name);
+  if (raw.genre) candidates.push(raw.genre);
+  if (raw.genre_name) candidates.push(raw.genre_name);
+  if (raw.product_type) candidates.push(raw.product_type);
+  if (raw.item_type) candidates.push(raw.item_type);
+  return candidates.filter((value) => value.trim().length > 0);
+}
+
+function matchesCategoryInMetadata(
+  metadata: Record<string, unknown> | null,
+  category: string
+): boolean {
+  const raw = coerceRawProductForCategory(metadata);
+  if (!raw) return false;
+  const normalizedTarget = normalizeCategoryText(category);
+  if (!normalizedTarget) return false;
+  const candidates = collectCategoryCandidates(raw);
+  return candidates.some((candidate) => {
+    const normalizedCandidate = normalizeCategoryText(candidate);
+    if (!normalizedCandidate) return false;
+    return (
+      normalizedCandidate.includes(normalizedTarget) ||
+      normalizedTarget.includes(normalizedCandidate)
+    );
+  });
+}
+
 function buildReasonLabels(slots: SlotState, match: Match): string[] {
   const labels: string[] = [];
-  if (slots.category) {
+  if (slots.category && matchesCategoryInMetadata(match.metadata, slots.category)) {
     labels.push("カテゴリ一致");
   }
   const budgetRange = parseBudgetRange(slots.budget);
@@ -311,6 +377,16 @@ function buildModalMatchFromSimilarResult(row: SimilarImageResult): Match {
     score: Math.max(0, 1 - row.distance),
     amount: row.amount,
   };
+}
+
+function excludeSourceProductFromSimilarResults(
+  results: SimilarImageResult[] | undefined,
+  sourceProductId: string
+): SimilarImageResult[] {
+  if (!results || results.length === 0) return [];
+  const trimmedSourceProductId = sourceProductId.trim();
+  if (!trimmedSourceProductId) return results;
+  return results.filter((row) => row.product_id !== trimmedSourceProductId);
 }
 
 function formatAgentSearchStrategy(
@@ -640,7 +716,9 @@ export default function RecommendAssistantPage() {
         throw new Error(data.error ?? `Request failed (status ${res.status})`);
       }
 
-      setSimilarImageResults(data.results ?? []);
+      setSimilarImageResults(
+        excludeSourceProductFromSimilarResults(data.results, sourceProductId)
+      );
       setSimilarImageEmbeddingMs(data.embeddingDurationMs ?? null);
       setSimilarImageModel(data.model ?? null);
     } catch (err) {

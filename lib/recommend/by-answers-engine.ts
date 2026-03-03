@@ -203,19 +203,23 @@ export async function recommendByAnswers(
         return amount !== null && withinBudget(amount, budgetRange);
       })
     : rawMatches;
-  const categoryFiltered =
-    input.category && input.category.trim().length > 0
-      ? budgetFiltered.filter((match) =>
-          matchesCategory(coerceRaw(match.metadata ?? null), input.category ?? "")
-        )
-      : budgetFiltered;
+  const hasCategoryCondition = Boolean(input.category && input.category.trim().length > 0);
+  const categoryFiltered = hasCategoryCondition
+    ? budgetFiltered.filter((match) =>
+        matchesCategory(coerceRaw(match.metadata ?? null), input.category ?? "")
+      )
+    : budgetFiltered;
+  const categoryFallbackBase =
+    hasCategoryCondition && categoryFiltered.length === 0
+      ? budgetFiltered
+      : categoryFiltered;
   const deliveryFiltered =
     input.delivery && input.delivery.length > 0
-      ? categoryFiltered.filter((match) => {
+      ? categoryFallbackBase.filter((match) => {
           const raw = coerceRaw(match.metadata ?? null);
           return input.delivery?.every((entry) => matchesDelivery(raw, entry));
         })
-      : categoryFiltered;
+      : categoryFallbackBase;
   let matches: RecommendByAnswersResult["matches"] = deliveryFiltered;
   if (input.userId) {
     try {

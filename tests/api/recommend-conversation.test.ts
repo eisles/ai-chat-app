@@ -187,6 +187,59 @@ describe("POST /api/recommend/conversation", () => {
     expect(json.queryText).toContain("カテゴリ: 旅行・体験");
   });
 
+  it("カテゴリ一致が0件でもカテゴリ条件を緩めて候補を返す", async () => {
+    createCompletion.mockResolvedValue({
+      content:
+        "{\"budget\":\"20,001〜30,000円\",\"category\":\"スイーツ\",\"purpose\":\"自宅用\",\"delivery\":[\"冷凍\"],\"allergen\":\"なし\"}",
+    });
+    generateTextEmbedding.mockResolvedValue({
+      vector: [0.2, 0.3],
+      model: "text-embedding-test",
+      dim: 2,
+      normalized: null,
+      durationMs: 12,
+      byteSize: 8,
+    });
+    searchTextEmbeddings.mockResolvedValue([
+      {
+        id: "id-fallback-1",
+        productId: "p-fallback-1",
+        cityCode: null,
+        text: "カテゴリ不一致でも候補に残る",
+        metadata: {
+          raw: {
+            amount: 25000,
+            shipping_frozen_flag: 1,
+            categories: [
+              {
+                category1_name: "肉",
+                category2_name: null,
+                category3_name: null,
+              },
+            ],
+          },
+        },
+        score: 0.73,
+        amount: 25000,
+      },
+    ]);
+
+    const req = new Request("http://localhost/api/recommend/conversation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "2万円台でスイーツがほしい" }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(json.action).toBe("recommend");
+    expect(json.matches).toHaveLength(1);
+    expect(json.matches[0].productId).toBe("p-fallback-1");
+  });
+
   it("配送をスキップ入力した場合は追加条件の質問に進む", async () => {
     createCompletion
       .mockResolvedValueOnce({
