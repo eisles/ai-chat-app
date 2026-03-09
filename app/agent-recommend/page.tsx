@@ -1,10 +1,11 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
+import { ProductResultCard } from "@/components/product-result-card";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
+import { extractMunicipalityName } from "@/lib/product-detail";
 
 // 商品詳細URLを構築
 function buildProductUrl(productId: string, cityCode: string | null): string {
@@ -708,68 +709,26 @@ export default function AgentRecommendPage() {
                     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                       {result.matches.map((match) => {
                         const { name, image } = extractProductInfo(match.metadata);
+                        const municipalityName = extractMunicipalityName(match.metadata);
                         const productUrl = buildProductUrl(match.productId, match.cityCode);
                         const displayName = name || `商品ID: ${match.productId}`;
 
                         return (
-                          <div
+                          <ProductResultCard
                             key={match.id}
-                            className="overflow-hidden rounded-lg border bg-background/70 shadow-sm transition-shadow hover:shadow-md"
-                          >
-                            {/* 商品画像 */}
-                            <div className="relative aspect-[4/3] bg-muted">
-                              {image ? (
-                                <Image
-                                  src={image}
-                                  alt={displayName}
-                                  fill
-                                  className="object-cover"
-                                  sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
-                                  onError={(e) => {
-                                    const target = e.currentTarget;
-                                    target.style.display = "none";
-                                    const fallback = target.parentElement?.querySelector(".image-fallback");
-                                    if (fallback) {
-                                      (fallback as HTMLElement).style.display = "flex";
-                                    }
-                                  }}
-                                />
-                              ) : null}
-                              <div
-                                className={`image-fallback absolute inset-0 items-center justify-center bg-muted text-4xl ${
-                                  image ? "hidden" : "flex"
-                                }`}
-                              >
-                                📦
-                              </div>
-                            </div>
-
-                            {/* 商品情報 */}
-                            <div className="p-3">
-                              <a
-                                href={productUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="line-clamp-2 text-sm font-medium hover:text-primary hover:underline"
-                                title={displayName}
-                              >
-                                {displayName}
-                                <span className="ml-1 inline-block text-xs text-muted-foreground">
-                                  ↗
-                                </span>
-                              </a>
-
-                              <div className="mt-2 text-lg font-bold text-primary">
-                                {match.amount
-                                  ? `${match.amount.toLocaleString()}円`
-                                  : "金額未設定"}
-                              </div>
-
-                              <div className="mt-1 text-xs text-muted-foreground">
+                            imageUrl={image}
+                            displayName={displayName}
+                            productUrl={productUrl}
+                            amount={match.amount ?? null}
+                            cityCode={match.cityCode}
+                            municipalityName={municipalityName}
+                            productId={match.productId}
+                            details={
+                              <div className="text-xs text-muted-foreground">
                                 スコア: {match.score.toFixed(4)}
                               </div>
-                            </div>
-                          </div>
+                            }
+                          />
                         );
                       })}
                     </div>

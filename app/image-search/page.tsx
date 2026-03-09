@@ -1,6 +1,7 @@
 "use client";
 
 import { ModelSelector } from "@/components/model-selector";
+import { ProductResultCard } from "@/components/product-result-card";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -53,6 +54,32 @@ function extractProductInfo(metadata: Record<string, unknown> | null): {
     image: typeof raw.image === "string" ? raw.image : null,
     amount: parseAmount(raw.amount),
   };
+}
+
+function extractMunicipalityName(metadata: Record<string, unknown> | null): string | null {
+  if (!metadata) {
+    return null;
+  }
+
+  const raw = metadata.raw as Record<string, unknown> | undefined;
+  if (!raw) {
+    return null;
+  }
+
+  const prefecture =
+    typeof raw.prefecture_name === "string" && raw.prefecture_name.trim().length > 0
+      ? raw.prefecture_name.trim()
+      : null;
+  const municipality =
+    typeof raw.city_name === "string" && raw.city_name.trim().length > 0
+      ? raw.city_name.trim()
+      : null;
+
+  if (prefecture && municipality) {
+    return `${prefecture} / ${municipality}`;
+  }
+
+  return municipality ?? prefecture ?? null;
 }
 
 type SearchMatch = {
@@ -522,6 +549,9 @@ export default function ImageSearchPage() {
                         const { name, image, amount } = extractProductInfo(
                           match.metadata ?? null,
                         );
+                        const municipalityName = extractMunicipalityName(
+                          match.metadata ?? null,
+                        );
                         const displayName = name ?? (match.productId
                           ? `商品ID: ${match.productId}`
                           : `ID: ${match.key}`);
@@ -530,63 +560,21 @@ export default function ImageSearchPage() {
                         const productUrl = buildProductUrl(match.productId, match.cityCode);
 
                         return (
-                          <div
+                          <ProductResultCard
                             key={match.key}
-                            className="overflow-hidden rounded-lg border bg-background/70 shadow-sm transition-shadow hover:shadow-md"
-                          >
-                            <div className="relative aspect-[4/3] bg-muted">
-                              {displayImage ? (
-                                <Image
-                                  src={displayImage}
-                                  alt={displayName}
-                                  fill
-                                  className="object-cover"
-                                  sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
-                                  onError={(event) => {
-                                    const target = event.currentTarget;
-                                    target.style.display = "none";
-                                    const fallback =
-                                      target.parentElement?.querySelector(".image-fallback");
-                                    if (fallback) {
-                                      (fallback as HTMLElement).style.display = "flex";
-                                    }
-                                  }}
-                                />
-                              ) : null}
-                              <div
-                                className={`image-fallback absolute inset-0 items-center justify-center bg-muted text-4xl ${
-                                  displayImage ? "hidden" : "flex"
-                                }`}
-                              >
-                                📦
-                              </div>
-                            </div>
-
-                            <div className="p-3">
-                              <a
-                                href={productUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="line-clamp-2 text-sm font-medium hover:text-primary hover:underline"
-                                title={displayName}
-                              >
-                                {displayName}
-                                <span className="ml-1 inline-block text-xs text-muted-foreground">
-                                  ↗
-                                </span>
-                              </a>
-
-                              <div className="mt-2 text-lg font-bold text-primary">
-                                {displayAmount != null
-                                  ? `${displayAmount.toLocaleString()}円`
-                                  : "金額未設定"}
-                              </div>
-
-                              <div className="mt-1 text-xs text-muted-foreground">
+                            imageUrl={displayImage}
+                            displayName={displayName}
+                            productUrl={productUrl}
+                            amount={displayAmount}
+                            cityCode={match.cityCode}
+                            municipalityName={municipalityName}
+                            productId={match.productId}
+                            details={
+                              <div className="text-xs text-muted-foreground">
                                 スコア: {match.score.toFixed(4)}
                               </div>
-                            </div>
-                          </div>
+                            }
+                          />
                         );
                       })}
                     </div>

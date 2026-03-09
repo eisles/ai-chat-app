@@ -1,6 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
+import { ProductResultCard } from "@/components/product-result-card";
 import { ProductImageGallery } from "@/components/product-image-gallery";
 import { Card } from "@/components/ui/card";
 import {
@@ -1452,111 +1453,55 @@ export default function RecommendAssistantPage() {
                   similarImageSourceUrl === image;
 
                 return (
-                  <div
+                  <ProductResultCard
                     key={match.id}
-                    className="overflow-hidden rounded-lg border bg-background/70 shadow-sm transition-shadow hover:shadow-md"
-                  >
-                    <div className="relative aspect-[4/3] bg-muted">
-                      {image ? (
-                        <Image
-                          src={image}
-                          alt={displayName}
-                          fill
-                          className="object-cover"
-                          sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
-                          onError={(event) => {
-                            const target = event.currentTarget;
-                            target.style.display = "none";
-                            const fallback = target.parentElement?.querySelector(
-                              ".image-fallback"
-                            );
-                            if (fallback) {
-                              (fallback as HTMLElement).style.display = "flex";
-                            }
-                          }}
-                        />
-                      ) : null}
-                      <div
-                        className={`image-fallback absolute inset-0 items-center justify-center bg-muted text-sm text-muted-foreground ${
-                          image ? "hidden" : "flex"
-                        }`}
-                      >
-                        画像なし
-                      </div>
-                    </div>
-
-                    <div className="p-3">
-                      <a
-                        href={productUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="line-clamp-2 text-sm font-medium hover:text-primary hover:underline"
-                        title={displayName}
-                        onClick={() => {
-                          if (!recommendUserId) return;
-                          trackClick({
-                            userId: recommendUserId,
-                            productId: match.productId,
-                            cityCode: match.cityCode,
-                            source: "recommend-assistant",
-                            score: match.score,
-                            metadata: clickMetadata,
-                          });
-                        }}
-                      >
-                        {displayName}
-                        <span className="ml-1 inline-block text-xs text-muted-foreground">
-                          ↗
-                        </span>
-                      </a>
-
-                      <div className="mt-2 text-lg font-bold text-primary">
-                        {match.amount ? `${match.amount.toLocaleString()}円` : "金額未設定"}
-                      </div>
-                      {isPersonalized && (
-                        <div className="mt-2 inline-flex rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
-                          あなた向け
-                        </div>
-                      )}
-
-                      {reasonLabels.length > 0 && (
-                        <div className="mt-2 flex flex-wrap gap-1">
-                          {reasonLabels.map((label) => (
-                            <span key={label} className="rounded bg-muted px-2 py-0.5 text-xs">
-                              {label}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-
-                      <div className="mt-2 text-xs text-muted-foreground">
+                    imageUrl={image}
+                    displayName={displayName}
+                    productUrl={productUrl}
+                    amount={match.amount ?? null}
+                    cityCode={match.cityCode}
+                    municipalityName={municipalityName}
+                    productId={match.productId}
+                    badges={
+                      <>
+                        {isPersonalized && (
+                          <div className="inline-flex rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
+                            あなた向け
+                          </div>
+                        )}
+                        {reasonLabels.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            {reasonLabels.map((label) => (
+                              <span key={label} className="rounded bg-muted px-2 py-0.5 text-xs">
+                                {label}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    }
+                    details={
+                      <div className="text-xs text-muted-foreground">
                         スコア: {match.score.toFixed(4)}
                       </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        自治体コード: {match.cityCode ?? "-"}
-                      </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        自治体名: {municipalityName ?? "-"}
-                      </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        品ID: {match.productId}
-                      </div>
-
+                    }
+                    primaryAction={
                       <Button
                         type="button"
                         size="sm"
                         variant="secondary"
-                        className="mt-3 w-full"
+                        className="w-full"
                         onClick={() => openProductDetailModal(match)}
                       >
                         画像と説明をみる
                       </Button>
-
+                    }
+                    secondaryAction={
                       <Button
                         type="button"
                         size="sm"
                         variant="outline"
-                        className="mt-2 w-full"
+                        className="w-full"
                         disabled={!image || similarImageLoading}
                         onClick={() => {
                           if (!image) return;
@@ -1576,8 +1521,19 @@ export default function RecommendAssistantPage() {
                             ? "類似画像を検索中..."
                             : "この画像に似た商品を検索"}
                       </Button>
-                    </div>
-                  </div>
+                    }
+                    onProductClick={() => {
+                      if (!recommendUserId) return;
+                      trackClick({
+                        userId: recommendUserId,
+                        productId: match.productId,
+                        cityCode: match.cityCode,
+                        source: "recommend-assistant",
+                        score: match.score,
+                        metadata: clickMetadata,
+                      });
+                    }}
+                  />
                 );
               })}
             </div>
@@ -1759,83 +1715,38 @@ export default function RecommendAssistantPage() {
                 similarImageSourceUrl === image;
 
               return (
-                <div
+                <ProductResultCard
                   key={`agent-${match.id}`}
-                  className="overflow-hidden rounded-lg border bg-background/70 shadow-sm transition-shadow hover:shadow-md"
-                >
-                  <div className="relative aspect-[4/3] bg-muted">
-                    {image ? (
-                      <Image
-                        src={image}
-                        alt={displayName}
-                        fill
-                        className="object-cover"
-                        sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
-                      />
-                    ) : (
-                      <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
-                        画像なし
-                      </div>
-                    )}
-                  </div>
-                  <div className="p-3">
-                    <a
-                      href={productUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="line-clamp-2 text-sm font-medium hover:text-primary hover:underline"
-                      title={displayName}
-                      onClick={() => {
-                        if (!recommendUserId) return;
-                        trackClick({
-                          userId: recommendUserId,
-                          productId: match.productId,
-                          cityCode: match.cityCode,
-                          source: "recommend-assistant",
-                          score: match.score,
-                          metadata: buildClickMetadata(
-                            match,
-                            agentQueryText ?? queryText,
-                            "agent_recommend_link"
-                          ),
-                        });
-                      }}
-                    >
-                      {displayName}
-                      <span className="ml-1 inline-block text-xs text-muted-foreground">
-                        ↗
-                      </span>
-                    </a>
-                    <div className="mt-2 text-xs text-primary">{match.agentReason}</div>
-                    <div className="mt-2 text-lg font-bold text-primary">
-                      {match.amount ? `${match.amount.toLocaleString()}円` : "金額未設定"}
-                    </div>
-                    <div className="mt-2 text-xs text-muted-foreground">
+                  imageUrl={image}
+                  displayName={displayName}
+                  productUrl={productUrl}
+                  amount={match.amount ?? null}
+                  cityCode={match.cityCode}
+                  municipalityName={municipalityName}
+                  productId={match.productId}
+                  accent={<div className="text-xs text-primary">{match.agentReason}</div>}
+                  details={
+                    <div className="text-xs text-muted-foreground">
                       スコア: {match.score.toFixed(4)}
                     </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      自治体コード: {match.cityCode ?? "-"}
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      自治体名: {municipalityName ?? "-"}
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      品ID: {match.productId}
-                    </div>
+                  }
+                  primaryAction={
                     <Button
                       type="button"
                       size="sm"
                       variant="secondary"
-                      className="mt-3 w-full"
+                      className="w-full"
                       onClick={() => openProductDetailModal(match)}
                     >
                       画像と説明をみる
                     </Button>
+                  }
+                  secondaryAction={
                     <Button
                       type="button"
                       size="sm"
                       variant="outline"
-                      className="mt-2 w-full"
+                      className="w-full"
                       disabled={!image || similarImageLoading}
                       onClick={() => {
                         if (!image) return;
@@ -1855,8 +1766,23 @@ export default function RecommendAssistantPage() {
                           ? "類似画像を検索中..."
                           : "この画像に似た商品を検索"}
                     </Button>
-                  </div>
-                </div>
+                  }
+                  onProductClick={() => {
+                    if (!recommendUserId) return;
+                    trackClick({
+                      userId: recommendUserId,
+                      productId: match.productId,
+                      cityCode: match.cityCode,
+                      source: "recommend-assistant",
+                      score: match.score,
+                      metadata: buildClickMetadata(
+                        match,
+                        agentQueryText ?? queryText,
+                        "agent_recommend_link"
+                      ),
+                    });
+                  }}
+                />
               );
             })}
           </div>
@@ -2019,67 +1945,23 @@ export default function RecommendAssistantPage() {
                   similarImageSourceUrl === sourceImageUrl;
 
                 return (
-                  <div
+                  <ProductResultCard
                     key={row.id}
-                    className="overflow-hidden rounded-lg border bg-background/70 shadow-sm transition-shadow hover:shadow-md"
-                  >
-                    <div className="relative aspect-[4/3] bg-muted">
-                      {displayImage ? (
-                        <Image
-                          src={displayImage}
-                          alt={displayName}
-                          fill
-                          className="object-cover"
-                          sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
-                          onError={(event) => {
-                            const target = event.currentTarget;
-                            target.style.display = "none";
-                            const fallback = target.parentElement?.querySelector(".image-fallback");
-                            if (fallback) {
-                              (fallback as HTMLElement).style.display = "flex";
-                            }
-                          }}
-                        />
-                      ) : null}
-                      <div
-                        className={`image-fallback absolute inset-0 items-center justify-center bg-muted text-sm text-muted-foreground ${
-                          displayImage ? "hidden" : "flex"
-                        }`}
-                      >
-                        画像なし
-                      </div>
-                    </div>
-                    <div className="p-3">
-                      <a
-                        href={productUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="line-clamp-2 text-sm font-medium hover:text-primary hover:underline"
-                        title={displayName}
-                      >
-                        {displayName}
-                        <span className="ml-1 inline-block text-xs text-muted-foreground">
-                          ↗
-                        </span>
-                      </a>
-
-                      <div className="mt-2 text-lg font-bold text-primary">
-                        {row.amount != null ? `${row.amount.toLocaleString()}円` : "金額未設定"}
-                      </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
+                    imageUrl={displayImage}
+                    displayName={displayName}
+                    productUrl={productUrl}
+                    amount={row.amount ?? null}
+                    cityCode={row.city_code ?? null}
+                    municipalityName={municipalityName}
+                    productId={row.product_id ?? null}
+                    details={
+                      <div className="text-xs text-muted-foreground">
                         距離: {row.distance.toFixed(4)}
                       </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        自治体コード: {row.city_code ?? "-"}
-                      </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        自治体名: {municipalityName ?? "-"}
-                      </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        品ID: {row.product_id ?? "-"}
-                      </div>
-                      {hasDifferentSearchImage && (
-                        <div className="mt-2 flex items-center gap-2 rounded-md border bg-muted/40 p-2">
+                    }
+                    extra={
+                      hasDifferentSearchImage ? (
+                        <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-2">
                           <div className="relative h-12 w-12 flex-none overflow-hidden rounded bg-muted">
                             <Image
                               src={sourceImageUrl}
@@ -2102,27 +1984,27 @@ export default function RecommendAssistantPage() {
                               画像なし
                             </div>
                           </div>
-                          <div className="text-xs text-muted-foreground">
-                            検索対象の画像
-                          </div>
+                          <div className="text-xs text-muted-foreground">検索対象の画像</div>
                         </div>
-                      )}
-
+                      ) : null
+                    }
+                    primaryAction={
                       <Button
                         type="button"
                         size="sm"
                         variant="secondary"
-                        className="mt-3 w-full"
+                        className="w-full"
                         onClick={() => openProductDetailModal(buildModalMatchFromSimilarResult(row))}
                       >
                         画像と説明をみる
                       </Button>
-
+                    }
+                    secondaryAction={
                       <Button
                         type="button"
                         size="sm"
                         variant="outline"
-                        className="mt-2 w-full"
+                        className="w-full"
                         disabled={sourceImageUrl.length === 0 || similarImageLoading}
                         onClick={() => {
                           if (!sourceImageUrl) return;
@@ -2142,8 +2024,8 @@ export default function RecommendAssistantPage() {
                             ? "類似画像を検索中..."
                             : "この画像に似た商品を検索"}
                       </Button>
-                    </div>
-                  </div>
+                    }
+                  />
                 );
               })}
             </div>

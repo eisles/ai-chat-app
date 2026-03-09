@@ -1,6 +1,7 @@
 "use client";
 
 import { ProductImageGallery } from "@/components/product-image-gallery";
+import { ProductResultCard } from "@/components/product-result-card";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -443,90 +444,37 @@ export default function ProductImagesVectorizeSearchPage() {
                           isSubmitting && activeQueryImageUrl === row.image_url;
 
                         return (
-                          <div
+                          <ProductResultCard
                             key={row.id}
-                            className="overflow-hidden rounded-lg border bg-background/70 shadow-sm transition-shadow hover:shadow-md"
-                          >
-                            {/* 商品画像 */}
-                            <div className="relative aspect-[4/3] bg-muted">
-                              {displayImage ? (
-                                <Image
-                                  src={displayImage}
-                                  alt={displayName}
-                                  fill
-                                  className="object-cover"
-                                  sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
-                                  onError={(event) => {
-                                    const target = event.currentTarget;
-                                    target.style.display = "none";
-                                    const fallback =
-                                      target.parentElement?.querySelector(
-                                        ".image-fallback",
-                                      );
-                                    if (fallback) {
-                                      (fallback as HTMLElement).style.display = "flex";
-                                    }
-                                  }}
-                                />
-                              ) : null}
-                              <div
-                                className={`image-fallback absolute inset-0 items-center justify-center bg-muted text-4xl ${
-                                  displayImage ? "hidden" : "flex"
-                                }`}
-                              >
-                                📦
-                              </div>
-                            </div>
-
-                            {/* 商品情報 */}
-                            <div className="p-3">
-                              <a
-                                href={productUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="line-clamp-2 text-sm font-medium hover:text-primary hover:underline"
-                                title={displayName}
-                              >
-                                {displayName}
-                                <span className="ml-1 inline-block text-xs text-muted-foreground">
-                                  ↗
-                                </span>
-                              </a>
-
-                              <div className="mt-2 text-lg font-bold text-primary">
-                                {row.amount != null
-                                  ? `${row.amount.toLocaleString()}円`
-                                  : "金額未設定"}
-                              </div>
-
-                              <div className="mt-1 text-xs text-muted-foreground">
+                            imageUrl={displayImage}
+                            displayName={displayName}
+                            productUrl={productUrl}
+                            amount={row.amount ?? null}
+                            cityCode={row.city_code ?? null}
+                            municipalityName={municipalityName}
+                            productId={row.product_id ?? null}
+                            details={
+                              <div className="text-xs text-muted-foreground">
                                 距離: {row.distance.toFixed(4)}
                               </div>
-                              <div className="mt-1 text-xs text-muted-foreground">
-                                自治体コード: {row.city_code ?? "-"}
-                              </div>
-                              <div className="mt-1 text-xs text-muted-foreground">
-                                自治体名: {municipalityName ?? "-"}
-                              </div>
-                              <div className="mt-1 text-xs text-muted-foreground">
-                                品ID: {row.product_id ?? "-"}
-                              </div>
-
+                            }
+                            primaryAction={
                               <Button
                                 type="button"
                                 size="sm"
                                 variant="secondary"
-                                className="mt-3 w-full"
+                                className="w-full"
                                 onClick={() => setModalItem(row)}
                               >
                                 画像と説明をみる
                               </Button>
-
+                            }
+                            secondaryAction={
                               <Button
                                 type="button"
                                 size="sm"
                                 variant="outline"
-                                className="mt-2 w-full"
+                                className="w-full"
                                 disabled={!canSearch || isSubmitting}
                                 onClick={() => {
                                   if (!canSearch) return;
@@ -539,8 +487,8 @@ export default function ProductImagesVectorizeSearchPage() {
                                     ? "類似画像を検索中..."
                                     : "この画像に似た商品を検索"}
                               </Button>
-                            </div>
-                          </div>
+                            }
+                          />
                         );
                       })}
                     </div>
