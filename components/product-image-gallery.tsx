@@ -1,8 +1,13 @@
 "use client";
 
 import Image from "next/image";
-import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import {
+  CheckIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  CopyIcon,
+} from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -24,7 +29,17 @@ export function ProductImageGallery({
     [images]
   );
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
   const thumbnailButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const copyResetTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+    };
+  }, []);
 
   function scrollThumbnailIntoView(index: number) {
     const target = thumbnailButtonRefs.current[index];
@@ -63,6 +78,28 @@ export function ProductImageGallery({
     selectThumbnail(nextIndex);
   }
 
+  async function copySelectedImageUrl() {
+    if (typeof navigator === "undefined" || !navigator.clipboard) {
+      setCopyState("error");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(selectedImage.url);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+
+    if (copyResetTimerRef.current !== null) {
+      window.clearTimeout(copyResetTimerRef.current);
+    }
+    copyResetTimerRef.current = window.setTimeout(() => {
+      setCopyState("idle");
+      copyResetTimerRef.current = null;
+    }, 1500);
+  }
+
   if (normalizedImages.length === 0) {
     return (
       <div className="relative aspect-[4/3] overflow-hidden rounded-md border bg-muted">
@@ -75,10 +112,29 @@ export function ProductImageGallery({
 
   const safeSelectedIndex = Math.min(selectedIndex, normalizedImages.length - 1);
   const selectedImage = normalizedImages[safeSelectedIndex] ?? normalizedImages[0]!;
+  const copyLabel =
+    copyState === "copied"
+      ? "コピー済み"
+      : copyState === "error"
+        ? "コピー失敗"
+        : "URLをコピー";
 
   return (
     <div className="space-y-3">
-      <div className="relative aspect-[4/3] overflow-hidden rounded-md border bg-muted">
+      <div
+        className="relative aspect-[4/3] overflow-hidden rounded-md border bg-muted outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft") {
+            event.preventDefault();
+            moveThumbnail("left");
+          }
+          if (event.key === "ArrowRight") {
+            event.preventDefault();
+            moveThumbnail("right");
+          }
+        }}
+      >
         <Image
           src={selectedImage.url}
           alt={title}
@@ -115,7 +171,26 @@ export function ProductImageGallery({
         <span>
           {safeSelectedIndex + 1} / {normalizedImages.length}
         </span>
-        <span>{formatProductImageSourceLabel(selectedImage.sourceKey)}</span>
+        <div className="flex items-center gap-2">
+          <span>{formatProductImageSourceLabel(selectedImage.sourceKey)}</span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs"
+            onClick={() => {
+              void copySelectedImageUrl();
+            }}
+            aria-label="画像URLをコピー"
+          >
+            {copyState === "copied" ? (
+              <CheckIcon className="h-3.5 w-3.5" />
+            ) : (
+              <CopyIcon className="h-3.5 w-3.5" />
+            )}
+            {copyLabel}
+          </Button>
+        </div>
       </div>
       {normalizedImages.length > 1 ? (
         <div className="relative w-full overflow-hidden">

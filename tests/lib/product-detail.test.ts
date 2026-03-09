@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   collectProductImageEntries,
   collectProductImageUrls,
+  extractMunicipalityName,
   extractProductInfo,
   formatProductImageSourceLabel,
 } from "@/lib/product-detail";
@@ -70,5 +71,16 @@ describe("product detail helpers", () => {
     expect(formatProductImageSourceLabel("slide_image1")).toBe("商品画像1");
     expect(formatProductImageSourceLabel("slide_image_2")).toBe("商品画像2");
     expect(formatProductImageSourceLabel("unknown_key")).toBe("unknown_key");
+  });
+
+  it("extracts municipality name from metadata.raw", () => {
+    const metadata = {
+      raw: {
+        prefecture_name: "北海道",
+        city_name: "長沼町",
+      },
+    };
+
+    expect(extractMunicipalityName(metadata)).toBe("北海道 / 長沼町");
   });
 });

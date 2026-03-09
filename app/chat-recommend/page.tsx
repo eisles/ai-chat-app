@@ -23,6 +23,7 @@ import {
 import type { SimilarImageResult } from "@/lib/similar-image-search";
 import {
   collectProductImageEntries,
+  extractMunicipalityName,
   extractProductInfo,
 } from "@/lib/product-detail";
 import { Textarea } from "@/components/ui/textarea";
@@ -54,6 +55,15 @@ type Match = {
   score: number;
   amount: number | null;
   rrfBreakdown?: RRFBreakdown[];
+};
+
+type SimilarImageSourceState = {
+  productId: string;
+  cityCode: string | null;
+  municipalityName: string | null;
+  name: string | null;
+  amount: number | null;
+  imageUrl: string;
 };
 
 type AmountRange = {
@@ -143,6 +153,8 @@ export default function ChatRecommendPage() {
   const [similarImageSourceProductId, setSimilarImageSourceProductId] = useState<string | null>(
     null
   );
+  const [similarImageSource, setSimilarImageSource] =
+    useState<SimilarImageSourceState | null>(null);
   const [similarImageResults, setSimilarImageResults] = useState<SimilarImageResult[]>([]);
   const [similarImageLoading, setSimilarImageLoading] = useState(false);
   const [similarImageError, setSimilarImageError] = useState<string | null>(null);
@@ -158,6 +170,7 @@ export default function ChatRecommendPage() {
   function clearSimilarImageResults() {
     setSimilarImageSourceUrl(null);
     setSimilarImageSourceProductId(null);
+    setSimilarImageSource(null);
     setSimilarImageResults([]);
     setSimilarImageLoading(false);
     setSimilarImageError(null);
@@ -203,17 +216,15 @@ export default function ChatRecommendPage() {
     return () => cancelAnimationFrame(frameId);
   }, [similarImageSearchRequestId]);
 
-  async function searchSimilarProductsByImage(
-    imageUrl: string,
-    sourceProductId: string
-  ) {
-    if (!imageUrl.trim()) return;
+  async function searchSimilarProductsByImage(source: SimilarImageSourceState) {
+    if (!source.imageUrl.trim()) return;
     const safeLimit = parseSimilarImageLimit(similarImageLimit);
 
     setSimilarImageLoading(true);
     setSimilarImageError(null);
-    setSimilarImageSourceUrl(imageUrl);
-    setSimilarImageSourceProductId(sourceProductId);
+    setSimilarImageSourceUrl(source.imageUrl);
+    setSimilarImageSourceProductId(source.productId);
+    setSimilarImageSource(source);
     setSimilarImageLimit(String(safeLimit));
     setSimilarImageResultLimit(safeLimit);
     setSimilarImageResults([]);
@@ -226,7 +237,7 @@ export default function ChatRecommendPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          imageUrl,
+          imageUrl: source.imageUrl,
           limit: safeLimit,
         }),
       });
@@ -246,7 +257,7 @@ export default function ChatRecommendPage() {
       }
 
       setSimilarImageResults(
-        excludeSourceProductFromSimilarResults(data.results, sourceProductId)
+        excludeSourceProductFromSimilarResults(data.results, source.productId)
       );
       setSimilarImageEmbeddingMs(data.embeddingDurationMs ?? null);
       setSimilarImageModel(data.model ?? null);
@@ -838,10 +849,14 @@ export default function ChatRecommendPage() {
                                   disabled={!image || similarImageLoading}
                                   onClick={() => {
                                     if (!image) return;
-                                    void searchSimilarProductsByImage(
-                                      image,
-                                      match.productId
-                                    );
+                                    void searchSimilarProductsByImage({
+                                      productId: match.productId,
+                                      cityCode: match.cityCode,
+                                      municipalityName,
+                                      name: name ?? null,
+                                      amount: match.amount ?? null,
+                                      imageUrl: image,
+                                    });
                                   }}
                                 >
                                   {!image
@@ -875,6 +890,7 @@ export default function ChatRecommendPage() {
                     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                       {result.matches.map((match) => {
                         const { name, image } = extractProductInfo(match.metadata);
+                        const municipalityName = extractMunicipalityName(match.metadata);
                         const productUrl = buildProductUrl(match.productId, match.cityCode);
                         const displayName = name || `商品ID: ${match.productId}`;
                         const isSearchingThisImage =
@@ -942,6 +958,15 @@ export default function ChatRecommendPage() {
                               <div className="mt-1 text-xs text-muted-foreground">
                                 スコア: {match.score.toFixed(4)}
                               </div>
+                              <div className="mt-1 text-xs text-muted-foreground">
+                                自治体コード: {match.cityCode ?? "-"}
+                              </div>
+                              <div className="mt-1 text-xs text-muted-foreground">
+                                自治体名: {municipalityName ?? "-"}
+                              </div>
+                              <div className="mt-1 text-xs text-muted-foreground">
+                                品ID: {match.productId}
+                              </div>
 
                               <Button
                                 type="button"
@@ -961,10 +986,14 @@ export default function ChatRecommendPage() {
                                 disabled={!image || similarImageLoading}
                                 onClick={() => {
                                   if (!image) return;
-                                  void searchSimilarProductsByImage(
-                                    image,
-                                    match.productId
-                                  );
+                                  void searchSimilarProductsByImage({
+                                    productId: match.productId,
+                                    cityCode: match.cityCode,
+                                    municipalityName,
+                                    name: name ?? null,
+                                    amount: match.amount ?? null,
+                                    imageUrl: image,
+                                  });
                                 }}
                               >
                                 {!image
@@ -1005,30 +1034,61 @@ export default function ChatRecommendPage() {
                 参照商品: {similarImageSourceProductId ?? "-"} / 表示件数:{" "}
                 {similarImageResultLimit}件
               </div>
-              <div className="break-all text-xs text-muted-foreground">
-                参照画像: {similarImageSourceUrl}
-              </div>
-              {similarImageSourceUrl && (
-                <div className="relative mt-2 aspect-[4/3] w-full max-w-sm overflow-hidden rounded-md border bg-muted">
-                  <Image
-                    src={similarImageSourceUrl}
-                    alt="参照画像"
-                    fill
-                    className="object-cover"
-                    sizes="(max-width: 640px) 100vw, 400px"
-                    onError={(event) => {
-                      const target = event.currentTarget;
-                      target.style.display = "none";
-                      const fallback = target.parentElement?.querySelector(
-                        ".source-image-fallback"
-                      );
-                      if (fallback) {
-                        (fallback as HTMLElement).style.display = "flex";
-                      }
-                    }}
-                  />
-                  <div className="source-image-fallback absolute inset-0 hidden items-center justify-center text-sm text-muted-foreground">
-                    画像を表示できません
+              {similarImageSource && (
+                <div className="mt-2 max-w-sm overflow-hidden rounded-lg border bg-background/70 shadow-sm">
+                  <div className="relative aspect-[4/3] bg-muted">
+                    <Image
+                      src={similarImageSource.imageUrl}
+                      alt={similarImageSource.name ?? "参照画像"}
+                      fill
+                      className="object-cover"
+                      sizes="(max-width: 640px) 100vw, 400px"
+                      onError={(event) => {
+                        const target = event.currentTarget;
+                        target.style.display = "none";
+                        const fallback = target.parentElement?.querySelector(
+                          ".source-image-fallback"
+                        );
+                        if (fallback) {
+                          (fallback as HTMLElement).style.display = "flex";
+                        }
+                      }}
+                    />
+                    <div className="source-image-fallback absolute inset-0 hidden items-center justify-center text-sm text-muted-foreground">
+                      画像を表示できません
+                    </div>
+                  </div>
+                  <div className="p-3">
+                    <a
+                      href={buildProductUrl(
+                        similarImageSource.productId,
+                        similarImageSource.cityCode
+                      )}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="line-clamp-2 text-sm font-medium hover:text-primary hover:underline"
+                      title={similarImageSource.name ?? `商品ID: ${similarImageSource.productId}`}
+                    >
+                      {similarImageSource.name ?? `商品ID: ${similarImageSource.productId}`}
+                      <span className="ml-1 inline-block text-xs text-muted-foreground">
+                        ↗
+                      </span>
+                    </a>
+                    <div className="mt-2 text-lg font-bold text-primary">
+                      {similarImageSource.amount != null
+                        ? `${similarImageSource.amount.toLocaleString()}円`
+                        : "金額未設定"}
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      品ID: {similarImageSource.productId} / 市町村コード:{" "}
+                      {similarImageSource.cityCode ?? "-"}
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      自治体名: {similarImageSource.municipalityName ?? "-"}
+                    </div>
+                    <div className="mt-2 break-all text-xs text-muted-foreground">
+                      参照画像: {similarImageSource.imageUrl}
+                    </div>
                   </div>
                 </div>
               )}
@@ -1068,6 +1128,7 @@ export default function ChatRecommendPage() {
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   {similarImageResults.map((row) => {
                     const { name, image } = extractProductInfo(row.metadata);
+                    const municipalityName = extractMunicipalityName(row.metadata);
                     const displayImage = image ?? row.image_url;
                     const sourceImageUrl = row.image_url || displayImage || "";
                     const sourceProductId = row.product_id ?? row.id;
@@ -1143,7 +1204,13 @@ export default function ChatRecommendPage() {
                             距離: {row.distance.toFixed(4)}
                           </div>
                           <div className="mt-1 text-xs text-muted-foreground">
-                            productId: {row.product_id ?? "-"}
+                            自治体コード: {row.city_code ?? "-"}
+                          </div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            自治体名: {municipalityName ?? "-"}
+                          </div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            品ID: {row.product_id ?? "-"}
                           </div>
                           {hasDifferentSearchImage && (
                             <div className="mt-2 flex items-center gap-2 rounded-md border bg-muted/40 p-2">
@@ -1199,10 +1266,14 @@ export default function ChatRecommendPage() {
                             }
                             onClick={() => {
                               if (!sourceImageUrl) return;
-                              void searchSimilarProductsByImage(
-                                sourceImageUrl,
-                                sourceProductId
-                              );
+                              void searchSimilarProductsByImage({
+                                productId: sourceProductId,
+                                cityCode: row.city_code ?? null,
+                                municipalityName,
+                                name: name ?? null,
+                                amount: row.amount ?? null,
+                                imageUrl: sourceImageUrl,
+                              });
                             }}
                           >
                             {sourceImageUrl.length === 0

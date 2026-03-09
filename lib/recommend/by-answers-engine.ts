@@ -33,6 +33,9 @@ export type RecommendByAnswersDebugInfo = {
     categoryFiltered: number;
     deliveryFiltered: number;
   };
+  delivery: {
+    skippedBecauseNone: boolean;
+  };
   embeddingCache: {
     hit: boolean;
     ttlMs: number;
@@ -106,8 +109,9 @@ export function buildQueryText(payload: RecommendByAnswersInput) {
     parts.push(`カテゴリ強調: ${payload.category}`);
   }
   if (payload.purpose) parts.push(`用途: ${payload.purpose}`);
-  if (payload.delivery && payload.delivery.length > 0) {
-    parts.push(`配送条件: ${payload.delivery.join(" / ")}`);
+  const deliveryForQuery = normalizeDeliveryFilters(payload.delivery);
+  if (deliveryForQuery.length > 0) {
+    parts.push(`配送条件: ${deliveryForQuery.join(" / ")}`);
   }
   if (payload.allergen && payload.allergen !== "なし") {
     parts.push(`アレルゲン配慮: ${payload.allergen}`);
@@ -231,6 +235,10 @@ function matchesDelivery(raw: RawProduct | null, delivery: string) {
   return false;
 }
 
+function isNoneDeliveryValue(entry: string) {
+  return entry === "特になし" || entry === "こだわらない";
+}
+
 function normalizeDeliveryFilters(delivery: string[] | undefined) {
   if (!delivery || delivery.length === 0) {
     return [];
@@ -238,12 +246,15 @@ function normalizeDeliveryFilters(delivery: string[] | undefined) {
 
   return delivery
     .map((entry) => entry.trim())
-    .filter(
-      (entry) =>
-        entry.length > 0 &&
-        entry !== "特になし" &&
-        entry !== "こだわらない"
-    );
+    .filter((entry) => entry.length > 0 && !isNoneDeliveryValue(entry));
+}
+
+function shouldSkipDeliveryBecauseNone(delivery: string[] | undefined) {
+  if (!delivery || delivery.length === 0) {
+    return false;
+  }
+
+  return delivery.some((entry) => isNoneDeliveryValue(entry.trim()));
 }
 
 function computeSearchCandidateTopK(input: {
@@ -294,6 +305,7 @@ export async function recommendByAnswers(
   let deliveryFilteredCount = 0;
   let embeddingCacheHit = false;
   let embeddingCacheTtlMs = 0;
+  let deliverySkippedBecauseNone = false;
   let personalizationAttempted = false;
   let personalizationProfileBuilt = false;
   let personalizationApplied = false;
@@ -306,6 +318,7 @@ export async function recommendByAnswers(
   const threshold = input.threshold ?? DEFAULT_THRESHOLD;
   const budgetRange = parseBudgetRange(input.budget);
   const deliveryFilters = normalizeDeliveryFilters(input.delivery);
+  deliverySkippedBecauseNone = shouldSkipDeliveryBecauseNone(input.delivery);
   const hasCategoryCondition = Boolean(input.category && input.category.trim().length > 0);
   const searchCandidateTopK = computeSearchCandidateTopK({
     topK,
@@ -410,6 +423,9 @@ export async function recommendByAnswers(
         budgetFiltered: budgetFilteredCount,
         categoryFiltered: categoryFilteredCount,
         deliveryFiltered: deliveryFilteredCount,
+      },
+      delivery: {
+        skippedBecauseNone: deliverySkippedBecauseNone,
       },
       embeddingCache: {
         hit: embeddingCacheHit,

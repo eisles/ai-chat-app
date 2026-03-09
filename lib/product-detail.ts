@@ -47,6 +47,15 @@ function normalizeImageUrl(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function normalizeText(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 export function extractProductInfo(
   metadata: Record<string, unknown> | null
 ): ProductDetailInfo {
@@ -71,6 +80,29 @@ export function extractProductInfo(
     image: normalizeImageUrl(raw.image),
     description: description ?? null,
   };
+}
+
+export function extractMunicipalityName(
+  metadata: Record<string, unknown> | null
+): string | null {
+  const raw = readRaw(metadata);
+  if (!raw) {
+    return null;
+  }
+
+  const municipalityCandidates = [
+    normalizeText(raw.municipality_name),
+    normalizeText(raw.city_name),
+    normalizeText(raw.local_government_name),
+  ];
+  const prefecture = normalizeText(raw.prefecture_name);
+  const municipality = municipalityCandidates.find((value) => value !== null);
+
+  if (prefecture && municipality) {
+    return `${prefecture} / ${municipality}`;
+  }
+
+  return municipality ?? prefecture ?? null;
 }
 
 export function collectProductImageUrls(

@@ -21,7 +21,7 @@ vi.mock("@/lib/recommend-personalization/rerank", () => ({
   applyPersonalization,
 }));
 
-const { recommendByAnswers } = await import("@/lib/recommend/by-answers-engine");
+const { buildQueryText, recommendByAnswers } = await import("@/lib/recommend/by-answers-engine");
 
 describe("recommendByAnswers", () => {
   beforeEach(() => {
@@ -92,6 +92,9 @@ describe("recommendByAnswers", () => {
       hit: false,
       ttlMs: 300000,
     });
+    expect(result.debugInfo.delivery).toEqual({
+      skippedBecauseNone: false,
+    });
     expect(progressStages).not.toContain("build_user_preference_profile");
     expect(progressStages).not.toContain("apply_personalization");
     expect(
@@ -155,6 +158,9 @@ describe("recommendByAnswers", () => {
       hit: true,
       ttlMs: 300000,
     });
+    expect(result.debugInfo.delivery).toEqual({
+      skippedBecauseNone: false,
+    });
     expect(progressStages).toContain("build_user_preference_profile");
     expect(progressStages).toContain("apply_personalization");
   });
@@ -206,12 +212,26 @@ describe("recommendByAnswers", () => {
       productId: "p-fruit-1",
       amount: 18000,
     });
+    expect(result.queryText).not.toContain("配送条件: 特になし");
+    expect(result.debugInfo.delivery).toEqual({
+      skippedBecauseNone: true,
+    });
     expect(result.debugInfo.counts).toEqual({
       rawMatches: 1,
       budgetFiltered: 1,
       categoryFiltered: 1,
       deliveryFiltered: 1,
     });
+  });
+
+  it("buildQueryText は配送希望の 特になし を含めない", () => {
+    expect(
+      buildQueryText({
+        category: "果物",
+        purpose: "自宅用",
+        delivery: ["特になし"],
+      })
+    ).toBe("カテゴリ: 果物\nカテゴリ優先: 果物\nカテゴリ強調: 果物\n用途: 自宅用");
   });
 
   it("配送条件があるときは内部候補数を広げてから配送フィルタし、最終件数は topK に揃える", async () => {

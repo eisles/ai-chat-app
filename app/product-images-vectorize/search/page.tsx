@@ -13,6 +13,7 @@ import {
 import { Input } from "@/components/ui/input";
 import {
   collectProductImageEntries,
+  extractMunicipalityName,
   extractProductInfo,
 } from "@/lib/product-detail";
 import Image from "next/image";
@@ -423,6 +424,9 @@ export default function ProductImagesVectorizeSearchPage() {
                         const { name, image } = extractProductInfo(
                           row.metadata ?? null,
                         );
+                        const municipalityName = extractMunicipalityName(
+                          row.metadata ?? null,
+                        );
                         const displayName = row.product_id
                           ? name ?? `商品ID: ${row.product_id}`
                           : name ?? `ID: ${row.id}`;
@@ -497,6 +501,15 @@ export default function ProductImagesVectorizeSearchPage() {
 
                               <div className="mt-1 text-xs text-muted-foreground">
                                 距離: {row.distance.toFixed(4)}
+                              </div>
+                              <div className="mt-1 text-xs text-muted-foreground">
+                                自治体コード: {row.city_code ?? "-"}
+                              </div>
+                              <div className="mt-1 text-xs text-muted-foreground">
+                                自治体名: {municipalityName ?? "-"}
+                              </div>
+                              <div className="mt-1 text-xs text-muted-foreground">
+                                品ID: {row.product_id ?? "-"}
                               </div>
 
                               <Button

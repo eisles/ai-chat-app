@@ -167,6 +167,9 @@ describe("POST /api/recommend/conversation", () => {
         categoryFiltered: 1,
         deliveryFiltered: 1,
       },
+      delivery: {
+        skippedBecauseNone: false,
+      },
       embeddingCache: {
         hit: false,
         ttlMs: 300000,
@@ -195,6 +198,64 @@ describe("POST /api/recommend/conversation", () => {
       amountMin: 10001,
       amountMax: 20000,
       deliveryFilters: ["冷凍"],
+    });
+  });
+
+  it("配送希望の 特になし は queryText に含めず debugInfo に反映する", async () => {
+    createCompletion.mockResolvedValue({
+      content:
+        "{\"budget\":\"10,001〜20,000円\",\"category\":\"果物\",\"purpose\":\"自宅用\",\"delivery\":[\"特になし\"],\"allergen\":\"なし\"}",
+    });
+    generateTextEmbedding.mockResolvedValue({
+      vector: [0.1, 0.2],
+      model: "text-embedding-test",
+      dim: 2,
+      normalized: null,
+      durationMs: 12,
+      byteSize: 8,
+    });
+    searchTextEmbeddings.mockResolvedValue([
+      {
+        id: "id-fruit-1",
+        productId: "p-fruit-1",
+        cityCode: null,
+        text: "果物テスト",
+        metadata: {
+          raw: {
+            amount: 12000,
+            category_name: "果物",
+          },
+        },
+        score: 0.91,
+        amount: 12000,
+      },
+    ]);
+
+    const req = new Request("http://localhost/api/recommend/conversation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "1万円前後で果物、配送は特になし" }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(json.action).toBe("recommend");
+    expect(json.queryText).not.toContain("配送条件: 特になし");
+    expect(json.debugInfo.recommendation).toMatchObject({
+      delivery: {
+        skippedBecauseNone: true,
+      },
+    });
+    expect(searchTextEmbeddings).toHaveBeenCalledWith({
+      embedding: [0.1, 0.2],
+      topK: 50,
+      threshold: 0.35,
+      amountMin: 10001,
+      amountMax: 20000,
+      deliveryFilters: [],
     });
   });
 
