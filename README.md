@@ -48,3 +48,23 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 
 - `VECTORIZE_ENDPOINT`: 例 `http://localhost:8080/vectorize`
 - 未設定の場合は `https://convertvectorapi.onrender.com/vectorize` を使用します。
+
+## Basic auth style protection
+
+サイト全体を簡易的に保護するため、`next@16` の `proxy.ts` で Basic 認証風のガードを入れています。
+
+- `BASIC_AUTH_USERNAME`: 認証ユーザー名
+- `BASIC_AUTH_PASSWORD`: 認証パスワード
+- `BASIC_AUTH_REALM`: 任意。未設定時は `Protected`
+
+設定例:
+
+```bash
+BASIC_AUTH_USERNAME=admin
+BASIC_AUTH_PASSWORD=change-me
+BASIC_AUTH_REALM=Preview
+```
+
+- `BASIC_AUTH_USERNAME` と `BASIC_AUTH_PASSWORD` の両方が未設定なら認証は無効です。
+- どちらか片方だけ設定された場合は誤設定とみなし、全リクエストを `500` にします。
+- `/_next/static`、`/_next/image`、`/favicon.ico` は除外しています。
