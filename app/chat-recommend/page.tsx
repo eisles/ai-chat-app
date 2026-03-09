@@ -27,6 +27,7 @@ import {
   extractMunicipalityName,
   extractProductInfo,
 } from "@/lib/product-detail";
+import { getOrCreateRecommendUserId } from "@/lib/recommend-personalization/client-user-id";
 import { Textarea } from "@/components/ui/textarea";
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
@@ -94,6 +95,21 @@ type SimilarImageApiResponse = {
   error?: string;
 };
 
+type ClickPayload = {
+  userId: string;
+  productId: string;
+  cityCode?: string | null;
+  source?: string;
+  score?: number | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+type ClickDebugState = {
+  interaction: string;
+  productId: string;
+  source: string;
+};
+
 type ApiResult = {
   ok: boolean;
   keywords?: string[];
@@ -127,6 +143,65 @@ function buildModalMatchFromSimilarResult(row: SimilarImageResult): Match {
     score: Math.max(0, 1 - row.distance),
     amount: row.amount,
   };
+}
+
+function trackClick(payload: ClickPayload) {
+  const body = JSON.stringify(payload);
+  if (navigator.sendBeacon) {
+    const blob = new Blob([body], { type: "application/json" });
+    if (navigator.sendBeacon("/api/recommend/events/click", blob)) return;
+  }
+  void fetch("/api/recommend/events/click", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true,
+  });
+}
+
+function buildClickMetadata(
+  match: Match,
+  queryText: string | null,
+  interaction: "external_link" | "modal_interest" | "similar_image_search"
+): Record<string, unknown> | null {
+  const metadata: Record<string, unknown> = {
+    interaction,
+  };
+  if (queryText) {
+    metadata.queryText = queryText;
+  }
+  if (match.rrfBreakdown && match.rrfBreakdown.length > 0) {
+    metadata.rrfBreakdown = match.rrfBreakdown;
+  }
+  return metadata;
+}
+
+function trackInterestBySimilarImageSearch(params: {
+  recommendUserId: string | null;
+  match: Match;
+  queryText: string | null;
+  source: string;
+  setLastTrackedClick: (value: ClickDebugState) => void;
+}) {
+  if (!params.recommendUserId) return;
+
+  trackClick({
+    userId: params.recommendUserId,
+    productId: params.match.productId,
+    cityCode: params.match.cityCode,
+    source: params.source,
+    score: params.match.score,
+    metadata: buildClickMetadata(
+      params.match,
+      params.queryText,
+      "similar_image_search"
+    ),
+  });
+  params.setLastTrackedClick({
+    interaction: "similar_image_search",
+    productId: params.match.productId,
+    source: params.source,
+  });
 }
 
 export default function ChatRecommendPage() {
@@ -166,6 +241,9 @@ export default function ChatRecommendPage() {
   );
   const [similarImageSearchRequestId, setSimilarImageSearchRequestId] = useState(0);
   const [modalMatch, setModalMatch] = useState<Match | null>(null);
+  const [modalInterestTracked, setModalInterestTracked] = useState(false);
+  const [recommendUserId, setRecommendUserId] = useState<string | null>(null);
+  const [lastTrackedClick, setLastTrackedClick] = useState<ClickDebugState | null>(null);
   const similarImageResultAnchorRef = useRef<HTMLDivElement | null>(null);
 
   function clearSimilarImageResults() {
@@ -181,11 +259,31 @@ export default function ChatRecommendPage() {
 
   function openProductDetailModal(match: Match) {
     setModalMatch(match);
+    setModalInterestTracked(false);
   }
 
   function handleModalOpenChange(open: boolean) {
     if (open) return;
     setModalMatch(null);
+    setModalInterestTracked(false);
+  }
+
+  function handleModalInterestClick() {
+    if (!modalMatch || modalInterestTracked || !recommendUserId) return;
+    trackClick({
+      userId: recommendUserId,
+      productId: modalMatch.productId,
+      cityCode: modalMatch.cityCode,
+      source: "chat-recommend",
+      score: modalMatch.score,
+      metadata: buildClickMetadata(modalMatch, result?.queryText ?? null, "modal_interest"),
+    });
+    setModalInterestTracked(true);
+    setLastTrackedClick({
+      interaction: "modal_interest",
+      productId: modalMatch.productId,
+      source: "chat-recommend",
+    });
   }
 
   useEffect(() => {
@@ -204,6 +302,7 @@ export default function ChatRecommendPage() {
         setCohereAvailable(data.cohereRerankerAvailable ?? false);
       })
       .catch(() => setCohereAvailable(false));
+    setRecommendUserId(getOrCreateRecommendUserId());
   }, []);
 
   useEffect(() => {
@@ -752,6 +851,12 @@ export default function ChatRecommendPage() {
               </div>
               {result.matches && result.matches.length > 0 ? (
                 <div className="space-y-3">
+                  {lastTrackedClick && (
+                    <div className="rounded bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+                      clickDebug: interaction={lastTrackedClick.interaction} / productId=
+                      {lastTrackedClick.productId} / source={lastTrackedClick.source}
+                    </div>
+                  )}
                   {/* 表示切り替えトグル */}
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium">表示モード:</span>
@@ -853,6 +958,13 @@ export default function ChatRecommendPage() {
                                   disabled={!image || similarImageLoading}
                                   onClick={() => {
                                     if (!image) return;
+                                    trackInterestBySimilarImageSearch({
+                                      recommendUserId,
+                                      match,
+                                      queryText: result?.queryText ?? null,
+                                      source: "chat-recommend",
+                                      setLastTrackedClick,
+                                    });
                                     void searchSimilarProductsByImage({
                                       productId: match.productId,
                                       cityCode: match.cityCode,
@@ -916,6 +1028,26 @@ export default function ChatRecommendPage() {
                                 スコア: {match.score.toFixed(4)}
                               </div>
                             }
+                            onProductClick={() => {
+                              if (!recommendUserId) return;
+                              trackClick({
+                                userId: recommendUserId,
+                                productId: match.productId,
+                                cityCode: match.cityCode,
+                                source: "chat-recommend",
+                                score: match.score,
+                                metadata: buildClickMetadata(
+                                  match,
+                                  result?.queryText ?? null,
+                                  "external_link"
+                                ),
+                              });
+                              setLastTrackedClick({
+                                interaction: "external_link",
+                                productId: match.productId,
+                                source: "chat-recommend",
+                              });
+                            }}
                             primaryAction={
                               <Button
                                 type="button"
@@ -936,6 +1068,13 @@ export default function ChatRecommendPage() {
                                 disabled={!image || similarImageLoading}
                                 onClick={() => {
                                   if (!image) return;
+                                  trackInterestBySimilarImageSearch({
+                                    recommendUserId,
+                                    match,
+                                    queryText: result?.queryText ?? null,
+                                    source: "chat-recommend",
+                                    setLastTrackedClick,
+                                  });
                                   void searchSimilarProductsByImage({
                                     productId: match.productId,
                                     cityCode: match.cityCode,
@@ -1114,6 +1253,27 @@ export default function ChatRecommendPage() {
                             距離: {row.distance.toFixed(4)}
                           </div>
                         }
+                        onProductClick={() => {
+                          if (!recommendUserId || !row.product_id) return;
+                          const clickMatch = buildModalMatchFromSimilarResult(row);
+                          trackClick({
+                            userId: recommendUserId,
+                            productId: clickMatch.productId,
+                            cityCode: clickMatch.cityCode,
+                            source: "chat-recommend",
+                            score: clickMatch.score,
+                            metadata: buildClickMetadata(
+                              clickMatch,
+                              result?.queryText ?? null,
+                              "external_link"
+                            ),
+                          });
+                          setLastTrackedClick({
+                            interaction: "external_link",
+                            productId: clickMatch.productId,
+                            source: "chat-recommend",
+                          });
+                        }}
                         extra={
                           hasDifferentSearchImage ? (
                             <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-2">
@@ -1171,6 +1331,13 @@ export default function ChatRecommendPage() {
                             }
                             onClick={() => {
                               if (!sourceImageUrl) return;
+                              trackInterestBySimilarImageSearch({
+                                recommendUserId,
+                                match: buildModalMatchFromSimilarResult(row),
+                                queryText: result?.queryText ?? null,
+                                source: "chat-recommend",
+                                setLastTrackedClick,
+                              });
                               void searchSimilarProductsByImage({
                                 productId: sourceProductId,
                                 cityCode: row.city_code ?? null,
@@ -1198,7 +1365,10 @@ export default function ChatRecommendPage() {
       )}
 
       <Dialog open={!!modalMatch} onOpenChange={handleModalOpenChange}>
-        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+        <DialogContent
+          className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"
+          onClick={handleModalInterestClick}
+        >
           <DialogHeader>
             <DialogTitle>{modalDisplayName ?? "商品詳細"}</DialogTitle>
             <DialogDescription>

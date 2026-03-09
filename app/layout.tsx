@@ -40,6 +40,7 @@ const navSections = [
       { href: "/product-json-import", label: "商品JSON取り込み" },
       { href: "/product-json-import-v2", label: "商品JSON取り込み(v2)" },
       { href: "/recommend-assistant-settings", label: "対話型レコメンド設定" },
+      { href: "/recommend-click-events", label: "クリックイベント管理" },
       { href: "/migrate-amount", label: "金額マイグレーション" },
     ],
   },

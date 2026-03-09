@@ -221,6 +221,12 @@ type ClickPayload = {
   metadata?: Record<string, unknown> | null;
 };
 
+type ClickDebugState = {
+  interaction: string;
+  productId: string;
+  source: string;
+};
+
 const AUTO_RELAX_STORAGE_KEY = "recommend_assistant_auto_relax";
 
 const FIELD_LABELS: Record<string, string> = {
@@ -504,7 +510,11 @@ function trackClick(payload: ClickPayload) {
 function buildClickMetadata(
   match: Match,
   queryText: string | null,
-  interaction: "external_link" | "modal_interest" | "agent_recommend_link"
+  interaction:
+    | "external_link"
+    | "modal_interest"
+    | "agent_recommend_link"
+    | "similar_image_search"
 ): Record<string, unknown> | null {
   const metadata: Record<string, unknown> = {};
   if (queryText) {
@@ -518,6 +528,34 @@ function buildClickMetadata(
     metadata.personalReasons = match.personalReasons;
   }
   return Object.keys(metadata).length > 0 ? metadata : null;
+}
+
+function trackInterestBySimilarImageSearch(params: {
+  recommendUserId: string | null;
+  match: Match;
+  queryText: string | null;
+  source: string;
+  setLastTrackedClick: (value: ClickDebugState) => void;
+}) {
+  if (!params.recommendUserId) return;
+
+  trackClick({
+    userId: params.recommendUserId,
+    productId: params.match.productId,
+    cityCode: params.match.cityCode,
+    source: params.source,
+    score: params.match.score,
+    metadata: buildClickMetadata(
+      params.match,
+      params.queryText,
+      "similar_image_search"
+    ),
+  });
+  params.setLastTrackedClick({
+    interaction: "similar_image_search",
+    productId: params.match.productId,
+    source: params.source,
+  });
 }
 
 function createInitialSession(): ConversationSession {
@@ -560,6 +598,7 @@ export default function RecommendAssistantPage() {
   const [fallbackInfo, setFallbackInfo] = useState<FallbackInfo | null>(null);
   const [hasInteracted, setHasInteracted] = useState(false);
   const [recommendUserId, setRecommendUserId] = useState<string | null>(null);
+  const [lastTrackedClick, setLastTrackedClick] = useState<ClickDebugState | null>(null);
   const [useLlmPersonalization, setUseLlmPersonalization] = useState(false);
   const [modalMatch, setModalMatch] = useState<Match | null>(null);
   const [modalInterestTracked, setModalInterestTracked] = useState(false);
@@ -1295,6 +1334,13 @@ export default function RecommendAssistantPage() {
                       ? "true"
                       : "false"}
                   </div>
+                  {lastTrackedClick && (
+                    <div className="text-xs">
+                      clickDebug: interaction={lastTrackedClick.interaction}
+                      {" / "}productId={lastTrackedClick.productId}
+                      {" / "}source={lastTrackedClick.source}
+                    </div>
+                  )}
                   <div className="space-y-1">
                     {conversationDebugInfo.recommendation.timings.map((timing) => (
                       <div
@@ -1505,6 +1551,13 @@ export default function RecommendAssistantPage() {
                         disabled={!image || similarImageLoading}
                         onClick={() => {
                           if (!image) return;
+                          trackInterestBySimilarImageSearch({
+                            recommendUserId,
+                            match,
+                            queryText,
+                            source: "recommend-assistant",
+                            setLastTrackedClick,
+                          });
                           void searchSimilarProductsByImage({
                             productId: match.productId,
                             cityCode: match.cityCode,
@@ -1750,6 +1803,13 @@ export default function RecommendAssistantPage() {
                       disabled={!image || similarImageLoading}
                       onClick={() => {
                         if (!image) return;
+                        trackInterestBySimilarImageSearch({
+                          recommendUserId,
+                          match,
+                          queryText: agentQueryText ?? queryText,
+                          source: "recommend-assistant",
+                          setLastTrackedClick,
+                        });
                         void searchSimilarProductsByImage({
                           productId: match.productId,
                           cityCode: match.cityCode,
@@ -2008,6 +2068,13 @@ export default function RecommendAssistantPage() {
                         disabled={sourceImageUrl.length === 0 || similarImageLoading}
                         onClick={() => {
                           if (!sourceImageUrl) return;
+                          trackInterestBySimilarImageSearch({
+                            recommendUserId,
+                            match: buildModalMatchFromSimilarResult(row),
+                            queryText,
+                            source: "recommend-assistant",
+                            setLastTrackedClick,
+                          });
                           void searchSimilarProductsByImage({
                             productId: sourceProductId,
                             cityCode: row.city_code ?? null,
