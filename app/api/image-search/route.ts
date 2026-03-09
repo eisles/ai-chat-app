@@ -20,7 +20,7 @@ export const runtime = "nodejs";
 
 const DEFAULT_VISION_MODEL = "openai:gpt-4o";
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
-const DEFAULT_TOP_K = 10;
+const DEFAULT_TOP_K = 30;
 const DEFAULT_THRESHOLD = 0.78;
 const VECTORIZE_ENDPOINT = "https://convertvectorapi.onrender.com/vectorize";
 const VECTORIZE_DIM = 512;

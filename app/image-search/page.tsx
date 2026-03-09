@@ -118,7 +118,7 @@ type ApiResult = {
 export default function ImageSearchPage() {
   const [file, setFile] = useState<File | null>(null);
   const [imageUrl, setImageUrl] = useState("");
-  const [topK, setTopK] = useState("5");
+  const [topK, setTopK] = useState("30");
   const [threshold, setThreshold] = useState("0.6");
   const [useAmountFilter, setUseAmountFilter] = useState(true);
   const [selectedModel, setSelectedModel] = useState("openai:gpt-4o");

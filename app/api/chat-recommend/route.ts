@@ -21,7 +21,7 @@ import { executeHybridSearch } from "@/lib/hybrid-search";
 export const runtime = "nodejs";
 
 const DEFAULT_MODEL = "openai:gpt-4o-mini";
-const DEFAULT_TOP_K = 10;
+const DEFAULT_TOP_K = 30;
 const DEFAULT_THRESHOLD = 0.6;
 const RRF_K = 60; // RRFアルゴリズムの定数
 const STOP_WORDS = (process.env.CHAT_RECOMMEND_STOP_WORDS ?? "")

@@ -6,7 +6,7 @@ import { getCachedQueryEmbedding } from "@/lib/recommend/query-embedding-cache";
 import { applyPersonalization } from "@/lib/recommend-personalization/rerank";
 import { buildUserPreferenceProfile } from "@/lib/recommend-personalization/profile";
 
-const DEFAULT_TOP_K = 10;
+const DEFAULT_TOP_K = 30;
 const DEFAULT_THRESHOLD = 0.3;
 
 export type RecommendByAnswersProgressStage =

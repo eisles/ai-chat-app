@@ -193,7 +193,7 @@ describe("POST /api/recommend/conversation", () => {
     ).toBe(true);
     expect(searchTextEmbeddings).toHaveBeenCalledWith({
       embedding: [0.1, 0.2],
-      topK: 50,
+      topK: 150,
       threshold: 0.35,
       amountMin: 10001,
       amountMax: 20000,
@@ -251,7 +251,7 @@ describe("POST /api/recommend/conversation", () => {
     });
     expect(searchTextEmbeddings).toHaveBeenCalledWith({
       embedding: [0.1, 0.2],
-      topK: 50,
+      topK: 150,
       threshold: 0.35,
       amountMin: 10001,
       amountMax: 20000,

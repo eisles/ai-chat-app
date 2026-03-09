@@ -535,7 +535,7 @@ export default function RecommendAssistantPage() {
   const [session, setSession] = useState<ConversationSession>(createInitialSession());
   const [messages, setMessages] = useState<Message[]>(defaultInitialState.messages);
   const [input, setInput] = useState("");
-  const [topK, setTopK] = useState("10");
+  const [topK, setTopK] = useState("30");
   const [threshold, setThreshold] = useState("0.35");
   const [matches, setMatches] = useState<Match[]>([]);
   const [queryText, setQueryText] = useState<string | null>(null);

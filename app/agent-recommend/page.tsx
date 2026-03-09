@@ -180,7 +180,7 @@ export default function AgentRecommendPage() {
   const [cityCode, setCityCode] = useState("");
 
   // 検索オプション
-  const [topK, setTopK] = useState("10");
+  const [topK, setTopK] = useState("30");
   const [threshold, setThreshold] = useState("0.35");
   const [useVectorSearch, setUseVectorSearch] = useState(true);
   const [useKeywordSearch, setUseKeywordSearch] = useState(true);

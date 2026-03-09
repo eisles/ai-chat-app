@@ -130,7 +130,7 @@ function buildModalMatchFromSimilarResult(row: SimilarImageResult): Match {
 
 export default function ChatRecommendPage() {
   const [history, setHistory] = useState("");
-  const [topK, setTopK] = useState("10");
+  const [topK, setTopK] = useState("30");
   const [threshold, setThreshold] = useState("0.35");
   const [similarImageLimit, setSimilarImageLimit] = useState(
     String(DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT)
