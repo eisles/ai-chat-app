@@ -3,9 +3,9 @@ import {
   insertMaintenanceActionLog,
 } from "@/lib/maintenance-action-log";
 import {
-  isVectorMaintenanceAction,
-  runVectorMaintenanceAction,
-} from "@/lib/vectorize-product-images-maintenance";
+  isTextEmbeddingsMaintenanceAction,
+  runTextEmbeddingsMaintenanceAction,
+} from "@/lib/text-embeddings-maintenance";
 
 type MaintenancePayload = {
   action?: unknown;
@@ -25,7 +25,7 @@ export async function POST(req: Request) {
     );
   }
 
-  if (!isVectorMaintenanceAction(payload.action)) {
+  if (!isTextEmbeddingsMaintenanceAction(payload.action)) {
     return Response.json(
       { ok: false, error: "action が不正です。" },
       { status: 400 }
@@ -33,10 +33,10 @@ export async function POST(req: Request) {
   }
 
   try {
-    const result = await runVectorMaintenanceAction(payload.action);
+    const result = await runTextEmbeddingsMaintenanceAction(payload.action);
     try {
       await insertMaintenanceActionLog({
-        target: "product_images_vectorize",
+        target: "product_text_embeddings",
         action: payload.action,
         status: "success",
         actor: requestContext.actor,
@@ -52,7 +52,7 @@ export async function POST(req: Request) {
       error instanceof Error ? error.message : "Unknown maintenance error";
     try {
       await insertMaintenanceActionLog({
-        target: "product_images_vectorize",
+        target: "product_text_embeddings",
         action: payload.action,
         status: "error",
         actor: requestContext.actor,

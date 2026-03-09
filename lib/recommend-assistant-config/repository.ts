@@ -21,6 +21,19 @@ type DbRow = {
 
 let schemaReady = false;
 let schemaPromise: Promise<void> | null = null;
+const PUBLISHED_QUESTION_SET_CACHE_TTL_MS = 5 * 60 * 1000;
+
+type PublishedQuestionSetCache = {
+  value: AssistantQuestionSet | null;
+  cachedAt: number;
+  hasValue: boolean;
+};
+
+let publishedQuestionSetCache: PublishedQuestionSetCache = {
+  value: null,
+  cachedAt: 0,
+  hasValue: false,
+};
 
 async function ensureQuestionSetSchema(): Promise<void> {
   if (schemaReady) return;
@@ -118,7 +131,31 @@ function mapRow(row: DbRow): AssistantQuestionSet {
   };
 }
 
+function setPublishedQuestionSetCache(value: AssistantQuestionSet | null) {
+  publishedQuestionSetCache = {
+    value,
+    cachedAt: Date.now(),
+    hasValue: true,
+  };
+}
+
+export function clearPublishedQuestionSetCache() {
+  publishedQuestionSetCache = {
+    value: null,
+    cachedAt: 0,
+    hasValue: false,
+  };
+}
+
 export async function getPublishedQuestionSet(): Promise<AssistantQuestionSet | null> {
+  const now = Date.now();
+  if (
+    publishedQuestionSetCache.hasValue &&
+    now - publishedQuestionSetCache.cachedAt < PUBLISHED_QUESTION_SET_CACHE_TTL_MS
+  ) {
+    return publishedQuestionSetCache.value;
+  }
+
   await ensureQuestionSetSchema();
   const db = getDb();
   const rows = (await db`
@@ -128,7 +165,9 @@ export async function getPublishedQuestionSet(): Promise<AssistantQuestionSet | 
     order by published_at desc nulls last
     limit 1
   `) as DbRow[];
-  return rows[0] ? mapRow(rows[0]) : null;
+  const questionSet = rows[0] ? mapRow(rows[0]) : null;
+  setPublishedQuestionSetCache(questionSet);
+  return questionSet;
 }
 
 export async function listQuestionSets(): Promise<AssistantQuestionSet[]> {
@@ -170,6 +209,7 @@ export async function createDraftSet(input: {
     returning *
   `) as DbRow[];
 
+  clearPublishedQuestionSetCache();
   return mapRow(rows[0]);
 }
 
@@ -194,6 +234,7 @@ export async function updateQuestionSet(
     returning *
   `) as DbRow[];
 
+  clearPublishedQuestionSetCache();
   return rows[0] ? mapRow(rows[0]) : null;
 }
 
@@ -211,6 +252,9 @@ export async function deleteQuestionSet(
     returning id
   `) as Array<{ id: string }>;
 
+  if (rows.length > 0) {
+    clearPublishedQuestionSetCache();
+  }
   return rows.length > 0;
 }
 
@@ -223,4 +267,5 @@ export async function publishSet(id: string): Promise<void> {
     set status = 'published', published_at = now(), updated_at = now()
     where id = ${id}
   `;
+  clearPublishedQuestionSetCache();
 }

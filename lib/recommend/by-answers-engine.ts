@@ -1,8 +1,8 @@
 import {
-  generateTextEmbedding,
   searchTextEmbeddings,
   type SearchMatch,
 } from "@/lib/image-text-search";
+import { getCachedQueryEmbedding } from "@/lib/recommend/query-embedding-cache";
 import { applyPersonalization } from "@/lib/recommend-personalization/rerank";
 import { buildUserPreferenceProfile } from "@/lib/recommend-personalization/profile";
 
@@ -32,6 +32,10 @@ export type RecommendByAnswersDebugInfo = {
     budgetFiltered: number;
     categoryFiltered: number;
     deliveryFiltered: number;
+  };
+  embeddingCache: {
+    hit: boolean;
+    ttlMs: number;
   };
   personalization: {
     attempted: boolean;
@@ -227,6 +231,34 @@ function matchesDelivery(raw: RawProduct | null, delivery: string) {
   return false;
 }
 
+function normalizeDeliveryFilters(delivery: string[] | undefined) {
+  if (!delivery || delivery.length === 0) {
+    return [];
+  }
+
+  return delivery
+    .map((entry) => entry.trim())
+    .filter(
+      (entry) =>
+        entry.length > 0 &&
+        entry !== "特になし" &&
+        entry !== "こだわらない"
+    );
+}
+
+function computeSearchCandidateTopK(input: {
+  topK: number;
+  hasCategoryCondition: boolean;
+}) {
+  let candidateTopK = input.topK;
+
+  if (input.hasCategoryCondition) {
+    candidateTopK = Math.max(candidateTopK, Math.min(Math.max(input.topK * 5, 50), 200));
+  }
+
+  return candidateTopK;
+}
+
 async function notifyProgress(
   input: RecommendByAnswersInput,
   stage: RecommendByAnswersProgressStage
@@ -248,6 +280,10 @@ async function measureStep<T>(
   return result;
 }
 
+function shouldApplyPersonalization(input: RecommendByAnswersInput) {
+  return Boolean(input.userId) && input.useLlmPersonalization === true;
+}
+
 export async function recommendByAnswers(
   input: RecommendByAnswersInput
 ): Promise<RecommendByAnswersResult> {
@@ -256,6 +292,8 @@ export async function recommendByAnswers(
   let budgetFilteredCount = 0;
   let categoryFilteredCount = 0;
   let deliveryFilteredCount = 0;
+  let embeddingCacheHit = false;
+  let embeddingCacheTtlMs = 0;
   let personalizationAttempted = false;
   let personalizationProfileBuilt = false;
   let personalizationApplied = false;
@@ -266,20 +304,31 @@ export async function recommendByAnswers(
   );
   const topK = input.topK ?? DEFAULT_TOP_K;
   const threshold = input.threshold ?? DEFAULT_THRESHOLD;
+  const budgetRange = parseBudgetRange(input.budget);
+  const deliveryFilters = normalizeDeliveryFilters(input.delivery);
+  const hasCategoryCondition = Boolean(input.category && input.category.trim().length > 0);
+  const searchCandidateTopK = computeSearchCandidateTopK({
+    topK,
+    hasCategoryCondition,
+  });
   await notifyProgress(input, "generate_text_embedding");
-  const embedding = await measureStep(timings, "generate_text_embedding", () =>
-    generateTextEmbedding(queryText)
+  const embeddingResult = await measureStep(timings, "generate_text_embedding", () =>
+    getCachedQueryEmbedding(queryText)
   );
+  embeddingCacheHit = embeddingResult.cacheHit;
+  embeddingCacheTtlMs = embeddingResult.ttlMs;
   await notifyProgress(input, "search_text_embeddings");
   const rawMatches = await measureStep(timings, "search_text_embeddings", () =>
     searchTextEmbeddings({
-      embedding: embedding.vector,
-      topK,
+      embedding: embeddingResult.embedding.vector,
+      topK: searchCandidateTopK,
       threshold,
+      amountMin: budgetRange?.min ?? null,
+      amountMax: budgetRange?.max ?? null,
+      deliveryFilters,
     })
   );
   rawMatchCount = rawMatches.length;
-  const budgetRange = parseBudgetRange(input.budget);
   await notifyProgress(input, "filter_budget");
   const budgetFiltered = await measureStep(timings, "filter_budget", () =>
     budgetRange
@@ -290,7 +339,6 @@ export async function recommendByAnswers(
       : rawMatches
   );
   budgetFilteredCount = budgetFiltered.length;
-  const hasCategoryCondition = Boolean(input.category && input.category.trim().length > 0);
   const allowCategoryFallback = input.allowCategoryFallback !== false;
   await notifyProgress(input, "filter_category");
   const categoryFiltered = await measureStep(timings, "filter_category", () =>
@@ -307,10 +355,10 @@ export async function recommendByAnswers(
   const categoryFallbackBase = fallbackApplied ? budgetFiltered : categoryFiltered;
   await notifyProgress(input, "filter_delivery");
   const deliveryFiltered = await measureStep(timings, "filter_delivery", () =>
-    input.delivery && input.delivery.length > 0
+    deliveryFilters.length > 0
       ? categoryFallbackBase.filter((match) => {
           const raw = coerceRaw(match.metadata ?? null);
-          return input.delivery?.every((entry) => matchesDelivery(raw, entry));
+          return deliveryFilters.every((entry) => matchesDelivery(raw, entry));
         })
       : categoryFallbackBase
   );
@@ -323,9 +371,8 @@ export async function recommendByAnswers(
     strictMatchCount,
     relaxedMatchCount: fallbackApplied ? deliveryFiltered.length : strictMatchCount,
   };
-  let matches: RecommendByAnswersResult["matches"] = deliveryFiltered;
-  const userId = input.userId;
-  if (userId) {
+  let matches: RecommendByAnswersResult["matches"] = deliveryFiltered.slice(0, topK);
+  if (shouldApplyPersonalization(input)) {
     personalizationAttempted = true;
     try {
       await notifyProgress(input, "build_user_preference_profile");
@@ -333,20 +380,20 @@ export async function recommendByAnswers(
         timings,
         "build_user_preference_profile",
         () =>
-          buildUserPreferenceProfile(userId, {
-            useLlmPersonalization: input.useLlmPersonalization === true,
+          buildUserPreferenceProfile(input.userId!, {
+            useLlmPersonalization: true,
           })
       );
       if (profile) {
         personalizationProfileBuilt = true;
         await notifyProgress(input, "apply_personalization");
         matches = await measureStep(timings, "apply_personalization", () =>
-          applyPersonalization(deliveryFiltered, profile)
+          applyPersonalization(deliveryFiltered, profile).slice(0, topK)
         );
         personalizationApplied = true;
       }
     } catch {
-      matches = deliveryFiltered;
+      matches = deliveryFiltered.slice(0, topK);
     }
   }
   await notifyProgress(input, "complete");
@@ -363,6 +410,10 @@ export async function recommendByAnswers(
         budgetFiltered: budgetFilteredCount,
         categoryFiltered: categoryFilteredCount,
         deliveryFiltered: deliveryFilteredCount,
+      },
+      embeddingCache: {
+        hit: embeddingCacheHit,
+        ttlMs: embeddingCacheTtlMs,
       },
       personalization: {
         attempted: personalizationAttempted,

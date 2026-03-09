@@ -136,6 +136,7 @@ async function ensureTextEmbeddingsTable() {
       await db`
         create index if not exists product_text_embeddings_amount_idx
           on product_text_embeddings(amount)
+          where amount is not null
       `;
       return db;
     } catch (error) {
@@ -377,11 +378,18 @@ export async function searchTextEmbeddings(options: {
   threshold: number;
   amountMin?: number | null;
   amountMax?: number | null;
+  deliveryFilters?: string[] | null;
 }): Promise<SearchMatch[]> {
   const db = await ensureTextEmbeddingsTable();
   const embeddingLiteral = `[${options.embedding.join(",")}]`;
   const amountMin = options.amountMin ?? null;
   const amountMax = options.amountMax ?? null;
+  const deliveryFilters = options.deliveryFilters ?? [];
+  const requireFrozen = deliveryFilters.includes("冷凍");
+  const requireRefrigerated = deliveryFilters.includes("冷蔵");
+  const requireOrdinary = deliveryFilters.includes("常温");
+  const requireHour = deliveryFilters.includes("日時指定できる");
+  const requireFast = deliveryFilters.includes("早く届く");
 
   const rows = (await db`
     select
@@ -396,6 +404,31 @@ export async function searchTextEmbeddings(options: {
     where 1 - (embedding <=> ${embeddingLiteral}::vector) >= ${options.threshold}
       and (${amountMin}::integer is null or amount >= ${amountMin})
       and (${amountMax}::integer is null or amount <= ${amountMax})
+      and (
+        not ${requireFrozen}
+        or coalesce((metadata->'raw'->>'shipping_frozen_flag')::int, 0) = 1
+        or coalesce(metadata->'raw'->>'shipping_text', '') like '%冷凍%'
+      )
+      and (
+        not ${requireRefrigerated}
+        or coalesce((metadata->'raw'->>'shipping_refrigerated_flag')::int, 0) = 1
+        or coalesce(metadata->'raw'->>'shipping_text', '') like '%冷蔵%'
+      )
+      and (
+        not ${requireOrdinary}
+        or coalesce((metadata->'raw'->>'shipping_ordinary_flag')::int, 0) = 1
+        or coalesce(metadata->'raw'->>'shipping_text', '') like '%常温%'
+      )
+      and (
+        not ${requireHour}
+        or coalesce((metadata->'raw'->>'delivery_hour_flag')::int, 0) = 1
+      )
+      and (
+        not ${requireFast}
+        or coalesce(metadata->'raw'->>'shipping_text', '') like '%早%'
+        or coalesce(metadata->'raw'->>'shipping_text', '') like '%即%'
+        or coalesce(metadata->'raw'->>'shipping_text', '') like '%以内%'
+      )
     order by embedding <=> ${embeddingLiteral}::vector
     limit ${options.topK}
   `) as Array<{

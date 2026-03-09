@@ -62,8 +62,12 @@ function parseNdjson(text: string) {
 }
 
 describe("POST /api/recommend/conversation", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    const { clearQueryEmbeddingCache } = await import(
+      "@/lib/recommend/query-embedding-cache"
+    );
+    clearQueryEmbeddingCache();
     insertRecommendSearchEvent.mockResolvedValue({ id: "event-1" });
     getRecommendCategoryQuickReplies.mockResolvedValue([
       "肉",
@@ -163,6 +167,10 @@ describe("POST /api/recommend/conversation", () => {
         categoryFiltered: 1,
         deliveryFiltered: 1,
       },
+      embeddingCache: {
+        hit: false,
+        ttlMs: 300000,
+      },
       personalization: {
         attempted: false,
         profileBuilt: false,
@@ -182,8 +190,11 @@ describe("POST /api/recommend/conversation", () => {
     ).toBe(true);
     expect(searchTextEmbeddings).toHaveBeenCalledWith({
       embedding: [0.1, 0.2],
-      topK: 10,
+      topK: 50,
       threshold: 0.35,
+      amountMin: 10001,
+      amountMax: 20000,
+      deliveryFilters: ["冷凍"],
     });
   });
 
@@ -737,6 +748,12 @@ describe("POST /api/recommend/conversation", () => {
         (timing) => timing.name === "generate_text_embedding"
       )
     ).toBe(true);
+    expect(resultEvent?.data?.debugInfo?.recommendation).toMatchObject({
+      embeddingCache: {
+        hit: false,
+        ttlMs: 300000,
+      },
+    });
   });
 
   it("公開済み設定がある場合は質問文と選択肢に反映される", async () => {

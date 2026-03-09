@@ -1,5 +1,6 @@
 "use client";
 
+import { ProductImageGallery } from "@/components/product-image-gallery";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -10,41 +11,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  collectProductImageEntries,
+  extractProductInfo,
+} from "@/lib/product-detail";
 import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
-
-// metadata.rawから商品情報を取得
-function extractProductInfo(metadata: Record<string, unknown> | null): {
-  name: string | null;
-  image: string | null;
-  description: string | null;
-} {
-  if (!metadata) {
-    return { name: null, image: null, description: null };
-  }
-
-  const raw = metadata.raw as Record<string, unknown> | undefined;
-  if (!raw) {
-    return { name: null, image: null, description: null };
-  }
-
-  const descriptionCandidates = [
-    raw.catchphrase,
-    raw.description,
-    raw.shipping_text,
-    raw.application_text,
-    raw.bulk_text,
-  ];
-  const description = descriptionCandidates.find(
-    (value): value is string => typeof value === "string" && value.trim().length > 0,
-  );
-
-  return {
-    name: typeof raw.name === "string" ? raw.name : null,
-    image: typeof raw.image === "string" ? raw.image : null,
-    description: description ?? null,
-  };
-}
 
 type ResultRow = {
   id: string;
@@ -127,7 +99,15 @@ export default function ProductImagesVectorizeSearchPage() {
     if (modalItem.product_id) return `商品ID: ${modalItem.product_id}`;
     return `ID: ${modalItem.id}`;
   }, [modalInfo, modalItem]);
-  const modalImage = modalInfo?.image ?? modalItem?.image_url ?? null;
+  const modalImages = useMemo(
+    () =>
+      modalItem
+        ? collectProductImageEntries(modalItem.metadata ?? null, [
+            { url: modalItem.image_url, sourceKey: "image_url" },
+          ])
+        : [],
+    [modalItem]
+  );
   const modalDescription = modalInfo?.description ?? "説明が登録されていません。";
 
   useEffect(() => {
@@ -576,21 +556,11 @@ export default function ProductImagesVectorizeSearchPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="relative aspect-[4/3] overflow-hidden rounded-md border bg-muted">
-              {modalImage ? (
-                <Image
-                  src={modalImage}
-                  alt={modalDisplayName ?? "商品画像"}
-                  fill
-                  className="object-cover"
-                  sizes="(max-width: 640px) 100vw, 720px"
-                />
-              ) : (
-                <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
-                  画像なし
-                </div>
-              )}
-            </div>
+            <ProductImageGallery
+              key={modalItem?.id ?? "empty"}
+              images={modalImages}
+              title={modalDisplayName ?? "商品画像"}
+            />
             <div className="space-y-2 text-sm">
               <div className="text-muted-foreground">
                 商品ID: {modalItem?.product_id ?? "-"} / 市町村コード:{" "}

@@ -1,6 +1,7 @@
 "use client";
 
 import { ModelSelector } from "@/components/model-selector";
+import { ProductImageGallery } from "@/components/product-image-gallery";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -20,6 +21,10 @@ import {
   parseSimilarImageLimit,
 } from "@/lib/similar-image-search";
 import type { SimilarImageResult } from "@/lib/similar-image-search";
+import {
+  collectProductImageEntries,
+  extractProductInfo,
+} from "@/lib/product-detail";
 import { Textarea } from "@/components/ui/textarea";
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
@@ -30,40 +35,6 @@ function buildProductUrl(productId: string, cityCode: string | null): string {
     return `https://www.furusato-tax.jp/product/detail/${cityCode}/${productId}`;
   }
   return `https://www.furusato-tax.jp/search?q=${productId}`;
-}
-
-// metadata.rawから商品情報を取得
-function extractProductInfo(metadata: Record<string, unknown> | null): {
-  name: string | null;
-  image: string | null;
-  description: string | null;
-} {
-  if (!metadata) {
-    return { name: null, image: null, description: null };
-  }
-
-  const raw = metadata.raw as Record<string, unknown> | undefined;
-  if (!raw) {
-    return { name: null, image: null, description: null };
-  }
-
-  const descriptionCandidates = [
-    raw.catchphrase,
-    raw.description,
-    raw.shipping_text,
-    raw.application_text,
-    raw.bulk_text,
-  ];
-  const description = descriptionCandidates.find(
-    (value): value is string =>
-      typeof value === "string" && value.trim().length > 0
-  );
-
-  return {
-    name: typeof raw.name === "string" ? raw.name : null,
-    image: typeof raw.image === "string" ? raw.image : null,
-    description: description ?? null,
-  };
 }
 
 type RRFBreakdown = {
@@ -77,6 +48,7 @@ type Match = {
   id: string;
   productId: string;
   cityCode: string | null;
+  imageUrl?: string | null;
   text: string;
   metadata: Record<string, unknown> | null;
   score: number;
@@ -138,6 +110,7 @@ function buildModalMatchFromSimilarResult(row: SimilarImageResult): Match {
     id: `similar-${row.id}`,
     productId: row.product_id ?? row.id,
     cityCode: row.city_code ?? null,
+    imageUrl: row.image_url ?? null,
     text: info.name ?? fallbackText,
     metadata: row.metadata,
     score: Math.max(0, 1 - row.distance),
@@ -338,7 +311,11 @@ export default function ChatRecommendPage() {
   const modalDisplayName = modalMatch
     ? modalInfo?.name ?? `商品ID: ${modalMatch.productId}`
     : null;
-  const modalImage = modalInfo?.image ?? null;
+  const modalImages = modalMatch
+    ? collectProductImageEntries(modalMatch.metadata, [
+        { url: modalMatch.imageUrl, sourceKey: "image_url" },
+      ])
+    : [];
   const modalDescription = modalMatch ? buildModalDescription(modalMatch) : "";
 
   return (
@@ -1253,21 +1230,11 @@ export default function ChatRecommendPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="relative aspect-[4/3] overflow-hidden rounded-md border bg-muted">
-              {modalImage ? (
-                <Image
-                  src={modalImage}
-                  alt={modalDisplayName ?? "商品画像"}
-                  fill
-                  className="object-cover"
-                  sizes="(max-width: 640px) 100vw, 720px"
-                />
-              ) : (
-                <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
-                  画像なし
-                </div>
-              )}
-            </div>
+            <ProductImageGallery
+              key={modalMatch?.id ?? "empty"}
+              images={modalImages}
+              title={modalDisplayName ?? "商品画像"}
+            />
             {modalMatch && (
               <div className="space-y-2 text-sm">
                 <div className="text-muted-foreground">

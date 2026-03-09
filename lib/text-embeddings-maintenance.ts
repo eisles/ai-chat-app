@@ -1,16 +1,19 @@
 import { neon } from "@neondatabase/serverless";
-import { getDb } from "@/lib/neon";
+
 import {
   listMaintenanceActionLogs,
   type MaintenanceActionLog,
 } from "@/lib/maintenance-action-log";
+import { getDb } from "@/lib/neon";
+import { refreshRecommendCategoryCandidatesCache } from "@/lib/recommend/category-candidates";
 
-export type VectorMaintenanceAction =
-  | "analyze_tables"
+export type TextEmbeddingsMaintenanceAction =
+  | "analyze_table"
   | "rebuild_hnsw_index"
-  | "repair_product_slide_unique_index";
+  | "repair_amount_index"
+  | "refresh_category_candidates_cache";
 
-export type VectorMaintenanceIndexStatus = {
+export type TextEmbeddingsMaintenanceIndexStatus = {
   indexName: string;
   isValid: boolean;
   isReady: boolean;
@@ -18,7 +21,7 @@ export type VectorMaintenanceIndexStatus = {
   indexDef: string;
 };
 
-export type VectorMaintenanceTableStats = {
+export type TextEmbeddingsMaintenanceTableStats = {
   tableName: string;
   liveRows: number;
   deadRows: number;
@@ -26,7 +29,7 @@ export type VectorMaintenanceTableStats = {
   lastAutoAnalyze: string | null;
 };
 
-export type VectorMaintenanceProgress = {
+export type TextEmbeddingsMaintenanceProgress = {
   processId: number;
   phase: string;
   blocksTotal: number;
@@ -34,70 +37,55 @@ export type VectorMaintenanceProgress = {
   tuplesDone: number;
 };
 
-export type VectorMaintenanceState = {
+export type TextEmbeddingsMaintenanceState = {
   checkedAt: string;
   summary: {
     totalRows: number;
     distinctProducts: number;
-    imageUrlRows: number;
+    amountRows: number;
+    productJsonRows: number;
     embeddedRows: number;
-    duplicateGroups: number;
-    duplicateRows: number;
+    categoryCandidatesCachedRows: number;
+    categoryCandidatesRefreshedAt: string | null;
   };
-  tables: VectorMaintenanceTableStats[];
-  indexes: VectorMaintenanceIndexStatus[];
-  activeRebuilds: VectorMaintenanceProgress[];
+  tables: TextEmbeddingsMaintenanceTableStats[];
+  indexes: TextEmbeddingsMaintenanceIndexStatus[];
+  activeRebuilds: TextEmbeddingsMaintenanceProgress[];
   recentLogs: MaintenanceActionLog[];
 };
 
-export type VectorMaintenanceActionResult = {
+export type TextEmbeddingsMaintenanceActionResult = {
   ok: true;
-  action: VectorMaintenanceAction;
+  action: TextEmbeddingsMaintenanceAction;
   message: string;
   executedAt: string;
 };
 
 const MAINTENANCE_INDEX_NAMES = [
-  "product_images_vectorize_embedding_hnsw_idx",
-  "product_images_vectorize_product_slide_uidx",
-  "product_images_vectorize_image_url_idx",
+  "product_text_embeddings_embedding_hnsw_idx",
+  "product_text_embeddings_amount_idx",
+  "product_text_embeddings_product_id_idx",
   "product_text_embeddings_product_json_latest_idx",
 ] as const;
 
-const VALID_ACTIONS: VectorMaintenanceAction[] = [
-  "analyze_tables",
+const VALID_ACTIONS: TextEmbeddingsMaintenanceAction[] = [
+  "analyze_table",
   "rebuild_hnsw_index",
-  "repair_product_slide_unique_index",
+  "repair_amount_index",
+  "refresh_category_candidates_cache",
 ];
 
 const HNSW_INDEX_SQL = `
-CREATE INDEX CONCURRENTLY product_images_vectorize_embedding_hnsw_idx
-  ON public.product_images_vectorize
-  USING hnsw (embedding vector_l2_ops)
+CREATE INDEX CONCURRENTLY product_text_embeddings_embedding_hnsw_idx
+  ON public.product_text_embeddings
+  USING hnsw (embedding vector_cosine_ops)
   WITH (m = 16, ef_construction = 64)
 `;
 
-const PRODUCT_SLIDE_DEDUPE_SQL = `
-WITH ranked AS (
-  SELECT
-    id,
-    row_number() OVER (
-      PARTITION BY product_id, slide_index
-      ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
-    ) AS row_num
-  FROM public.product_images_vectorize
-)
-DELETE FROM public.product_images_vectorize
-WHERE id IN (
-  SELECT id
-  FROM ranked
-  WHERE row_num > 1
-)
-`;
-
-const PRODUCT_SLIDE_UNIQUE_SQL = `
-CREATE UNIQUE INDEX CONCURRENTLY product_images_vectorize_product_slide_uidx
-  ON public.product_images_vectorize (product_id, slide_index)
+const AMOUNT_INDEX_SQL = `
+CREATE INDEX CONCURRENTLY product_text_embeddings_amount_idx
+  ON public.product_text_embeddings (amount)
+  WHERE amount IS NOT NULL
 `;
 
 function getMaintenanceConnectionString(): string {
@@ -121,52 +109,31 @@ function getMaintenanceDb() {
   return neon(getMaintenanceConnectionString());
 }
 
-export function isVectorMaintenanceAction(
+export function isTextEmbeddingsMaintenanceAction(
   value: unknown
-): value is VectorMaintenanceAction {
+): value is TextEmbeddingsMaintenanceAction {
   return (
     typeof value === "string" &&
-    VALID_ACTIONS.includes(value as VectorMaintenanceAction)
+    VALID_ACTIONS.includes(value as TextEmbeddingsMaintenanceAction)
   );
 }
 
-async function getDuplicateSummary() {
-  const db = getDb();
-  const rows = (await db`
-    select
-      count(*)::int as duplicate_groups,
-      coalesce(sum(cnt - 1), 0)::int as duplicate_rows
-    from (
-      select count(*)::int as cnt
-      from public.product_images_vectorize
-      group by product_id, slide_index
-      having count(*) > 1
-    ) duplicates
-  `) as Array<{
-    duplicate_groups: number | null;
-    duplicate_rows: number | null;
-  }>;
-
-  return {
-    duplicateGroups: rows[0]?.duplicate_groups ?? 0,
-    duplicateRows: rows[0]?.duplicate_rows ?? 0,
-  };
-}
-
-export async function getVectorMaintenanceState(): Promise<VectorMaintenanceState> {
+export async function getTextEmbeddingsMaintenanceState(): Promise<TextEmbeddingsMaintenanceState> {
   const db = getDb();
 
   const summaryRows = (await db`
     select
       count(*)::int as total_rows,
       count(distinct product_id)::int as distinct_products,
-      count(*) filter (where image_url is not null)::int as image_url_rows,
+      count(*) filter (where amount is not null)::int as amount_rows,
+      count(*) filter (where text_source = 'product_json')::int as product_json_rows,
       count(*) filter (where embedding is not null)::int as embedded_rows
-    from public.product_images_vectorize
+    from public.product_text_embeddings
   `) as Array<{
     total_rows: number;
     distinct_products: number;
-    image_url_rows: number;
+    amount_rows: number;
+    product_json_rows: number;
     embedded_rows: number;
   }>;
 
@@ -179,7 +146,7 @@ export async function getVectorMaintenanceState(): Promise<VectorMaintenanceStat
       last_autoanalyze
     from pg_stat_user_tables
     where schemaname = 'public'
-      and relname in ('product_images_vectorize', 'product_text_embeddings')
+      and relname = 'product_text_embeddings'
     order by relname
   `) as Array<{
     table_name: string;
@@ -219,7 +186,7 @@ export async function getVectorMaintenanceState(): Promise<VectorMaintenanceStat
       coalesce(blocks_done, 0)::int as blocks_done,
       coalesce(tuples_done, 0)::int as tuples_done
     from pg_stat_progress_create_index
-    where relid = 'public.product_images_vectorize'::regclass
+    where relid = 'public.product_text_embeddings'::regclass
     order by pid
   `) as Array<{
     process_id: number;
@@ -228,19 +195,42 @@ export async function getVectorMaintenanceState(): Promise<VectorMaintenanceStat
     blocks_done: number;
     tuples_done: number;
   }>;
+  let categoryCandidatesCachedRows = 0;
+  let categoryCandidatesRefreshedAt: string | null = null;
 
-  const duplicates = await getDuplicateSummary();
-  const recentLogs = await listMaintenanceActionLogs("product_images_vectorize");
+  try {
+    const categoryCacheRows = (await db`
+      select
+        count(*)::int as cached_rows,
+        max(refreshed_at) as refreshed_at
+      from public.recommend_category_candidates_cache
+    `) as Array<{
+      cached_rows: number;
+      refreshed_at: Date | null;
+    }>;
+
+    categoryCandidatesCachedRows = categoryCacheRows[0]?.cached_rows ?? 0;
+    categoryCandidatesRefreshedAt =
+      categoryCacheRows[0]?.refreshed_at?.toISOString() ?? null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (!message.includes("recommend_category_candidates_cache")) {
+      throw error;
+    }
+  }
+
+  const recentLogs = await listMaintenanceActionLogs("product_text_embeddings");
 
   return {
     checkedAt: new Date().toISOString(),
     summary: {
       totalRows: summaryRows[0]?.total_rows ?? 0,
       distinctProducts: summaryRows[0]?.distinct_products ?? 0,
-      imageUrlRows: summaryRows[0]?.image_url_rows ?? 0,
+      amountRows: summaryRows[0]?.amount_rows ?? 0,
+      productJsonRows: summaryRows[0]?.product_json_rows ?? 0,
       embeddedRows: summaryRows[0]?.embedded_rows ?? 0,
-      duplicateGroups: duplicates.duplicateGroups,
-      duplicateRows: duplicates.duplicateRows,
+      categoryCandidatesCachedRows,
+      categoryCandidatesRefreshedAt,
     },
     tables: tableRows.map((row) => ({
       tableName: row.table_name,
@@ -267,40 +257,42 @@ export async function getVectorMaintenanceState(): Promise<VectorMaintenanceStat
   };
 }
 
-async function analyzeTables() {
+async function analyzeTable() {
   const db = getMaintenanceDb();
-  await db.query("ANALYZE public.product_images_vectorize");
   await db.query("ANALYZE public.product_text_embeddings");
 }
 
 async function rebuildHnswIndex() {
   const db = getMaintenanceDb();
   await db.query(
-    "DROP INDEX CONCURRENTLY IF EXISTS public.product_images_vectorize_embedding_hnsw_idx"
+    "DROP INDEX CONCURRENTLY IF EXISTS public.product_text_embeddings_embedding_hnsw_idx"
   );
   await db.query(HNSW_INDEX_SQL);
-  await db.query("ANALYZE public.product_images_vectorize");
+  await db.query("ANALYZE public.product_text_embeddings");
 }
 
-async function repairProductSlideUniqueIndex() {
+async function repairAmountIndex() {
   const db = getMaintenanceDb();
-  await db.query(PRODUCT_SLIDE_DEDUPE_SQL);
   await db.query(
-    "DROP INDEX CONCURRENTLY IF EXISTS public.product_images_vectorize_product_slide_uidx"
+    "DROP INDEX CONCURRENTLY IF EXISTS public.product_text_embeddings_amount_idx"
   );
-  await db.query(PRODUCT_SLIDE_UNIQUE_SQL);
-  await db.query("ANALYZE public.product_images_vectorize");
+  await db.query(AMOUNT_INDEX_SQL);
+  await db.query("ANALYZE public.product_text_embeddings");
 }
 
-export async function runVectorMaintenanceAction(
-  action: VectorMaintenanceAction
-): Promise<VectorMaintenanceActionResult> {
-  if (action === "analyze_tables") {
-    await analyzeTables();
+async function refreshCategoryCandidatesCache() {
+  await refreshRecommendCategoryCandidatesCache();
+}
+
+export async function runTextEmbeddingsMaintenanceAction(
+  action: TextEmbeddingsMaintenanceAction
+): Promise<TextEmbeddingsMaintenanceActionResult> {
+  if (action === "analyze_table") {
+    await analyzeTable();
     return {
       ok: true,
       action,
-      message: "ANALYZE を実行しました。",
+      message: "product_text_embeddings に ANALYZE を実行しました。",
       executedAt: new Date().toISOString(),
     };
   }
@@ -311,17 +303,28 @@ export async function runVectorMaintenanceAction(
       ok: true,
       action,
       message:
-        "HNSW index を再構築し、product_images_vectorize を ANALYZE しました。",
+        "product_text_embeddings の HNSW index を再構築し、ANALYZE を実行しました。",
       executedAt: new Date().toISOString(),
     };
   }
 
-  await repairProductSlideUniqueIndex();
+  if (action === "repair_amount_index") {
+    await repairAmountIndex();
+    return {
+      ok: true,
+      action,
+      message:
+        "product_text_embeddings_amount_idx を再作成し、ANALYZE を実行しました。",
+      executedAt: new Date().toISOString(),
+    };
+  }
+
+  await refreshCategoryCandidatesCache();
   return {
     ok: true,
     action,
     message:
-      "重複行を整理したうえで (product_id, slide_index) unique index を再構築しました。",
+      "recommend_category_candidates_cache を更新しました。",
     executedAt: new Date().toISOString(),
   };
 }
