@@ -835,7 +835,10 @@ export default function ChatRecommendPage() {
                           </div>
                           <div className="mt-2 text-sm">{match.text}</div>
                           {(() => {
-                            const { image } = extractProductInfo(match.metadata);
+                            const { image, name } = extractProductInfo(match.metadata);
+                            const municipalityName = extractMunicipalityName(
+                              match.metadata
+                            );
                             const isSearchingThisImage =
                               similarImageLoading &&
                               similarImageSourceUrl === image;
