@@ -3,10 +3,26 @@
 import { ModelSelector } from "@/components/model-selector";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  buildProductUrlForVectorResult,
+  DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT,
+  excludeSourceProductFromSimilarResults,
+  MAX_SIMILAR_IMAGE_RESULT_LIMIT,
+  MIN_SIMILAR_IMAGE_RESULT_LIMIT,
+  parseSimilarImageLimit,
+} from "@/lib/similar-image-search";
+import type { SimilarImageResult } from "@/lib/similar-image-search";
 import { Textarea } from "@/components/ui/textarea";
 import Image from "next/image";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 // 商品詳細URLを構築
 function buildProductUrl(productId: string, cityCode: string | null): string {
@@ -20,19 +36,33 @@ function buildProductUrl(productId: string, cityCode: string | null): string {
 function extractProductInfo(metadata: Record<string, unknown> | null): {
   name: string | null;
   image: string | null;
+  description: string | null;
 } {
   if (!metadata) {
-    return { name: null, image: null };
+    return { name: null, image: null, description: null };
   }
 
   const raw = metadata.raw as Record<string, unknown> | undefined;
   if (!raw) {
-    return { name: null, image: null };
+    return { name: null, image: null, description: null };
   }
+
+  const descriptionCandidates = [
+    raw.catchphrase,
+    raw.description,
+    raw.shipping_text,
+    raw.application_text,
+    raw.bulk_text,
+  ];
+  const description = descriptionCandidates.find(
+    (value): value is string =>
+      typeof value === "string" && value.trim().length > 0
+  );
 
   return {
     name: typeof raw.name === "string" ? raw.name : null,
     image: typeof raw.image === "string" ? raw.image : null,
+    description: description ?? null,
   };
 }
 
@@ -70,6 +100,17 @@ type SearchStats = {
   threshold?: number;
 };
 
+type SimilarImageApiResponse = {
+  ok: boolean;
+  queryImageUrl?: string;
+  embeddingDurationMs?: number;
+  model?: string;
+  dim?: number;
+  normalized?: boolean | null;
+  results?: SimilarImageResult[];
+  error?: string;
+};
+
 type ApiResult = {
   ok: boolean;
   keywords?: string[];
@@ -84,10 +125,33 @@ type ApiResult = {
   error?: string;
 };
 
+function buildModalDescription(match: Match): string {
+  const info = extractProductInfo(match.metadata);
+  if (info.description) return info.description;
+  return match.text;
+}
+
+function buildModalMatchFromSimilarResult(row: SimilarImageResult): Match {
+  const info = extractProductInfo(row.metadata);
+  const fallbackText = row.product_id ? `商品ID: ${row.product_id}` : `ID: ${row.id}`;
+  return {
+    id: `similar-${row.id}`,
+    productId: row.product_id ?? row.id,
+    cityCode: row.city_code ?? null,
+    text: info.name ?? fallbackText,
+    metadata: row.metadata,
+    score: Math.max(0, 1 - row.distance),
+    amount: row.amount,
+  };
+}
+
 export default function ChatRecommendPage() {
   const [history, setHistory] = useState("");
   const [topK, setTopK] = useState("10");
   const [threshold, setThreshold] = useState("0.35");
+  const [similarImageLimit, setSimilarImageLimit] = useState(
+    String(DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT)
+  );
   const [useReranking, setUseReranking] = useState(true);
   const [useSimilarSearch, setUseSimilarSearch] = useState(false);
   // 個別検索方式フラグ
@@ -101,7 +165,41 @@ export default function ChatRecommendPage() {
   const [selectedModel, setSelectedModel] = useState("openai:gpt-4o-mini");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [result, setResult] = useState<ApiResult | null>(null);
-  const [displayMode, setDisplayMode] = useState<"debug" | "product">("debug");
+  const [displayMode, setDisplayMode] = useState<"debug" | "product">("product");
+  const [similarImageSourceUrl, setSimilarImageSourceUrl] = useState<string | null>(null);
+  const [similarImageSourceProductId, setSimilarImageSourceProductId] = useState<string | null>(
+    null
+  );
+  const [similarImageResults, setSimilarImageResults] = useState<SimilarImageResult[]>([]);
+  const [similarImageLoading, setSimilarImageLoading] = useState(false);
+  const [similarImageError, setSimilarImageError] = useState<string | null>(null);
+  const [similarImageEmbeddingMs, setSimilarImageEmbeddingMs] = useState<number | null>(null);
+  const [similarImageModel, setSimilarImageModel] = useState<string | null>(null);
+  const [similarImageResultLimit, setSimilarImageResultLimit] = useState(
+    DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT
+  );
+  const [similarImageSearchRequestId, setSimilarImageSearchRequestId] = useState(0);
+  const [modalMatch, setModalMatch] = useState<Match | null>(null);
+  const similarImageResultAnchorRef = useRef<HTMLDivElement | null>(null);
+
+  function clearSimilarImageResults() {
+    setSimilarImageSourceUrl(null);
+    setSimilarImageSourceProductId(null);
+    setSimilarImageResults([]);
+    setSimilarImageLoading(false);
+    setSimilarImageError(null);
+    setSimilarImageEmbeddingMs(null);
+    setSimilarImageModel(null);
+  }
+
+  function openProductDetailModal(match: Match) {
+    setModalMatch(match);
+  }
+
+  function handleModalOpenChange(open: boolean) {
+    if (open) return;
+    setModalMatch(null);
+  }
 
   useEffect(() => {
     // ストップワード取得
@@ -121,10 +219,78 @@ export default function ChatRecommendPage() {
       .catch(() => setCohereAvailable(false));
   }, []);
 
+  useEffect(() => {
+    if (similarImageSearchRequestId <= 0) return;
+    const frameId = requestAnimationFrame(() => {
+      similarImageResultAnchorRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+    return () => cancelAnimationFrame(frameId);
+  }, [similarImageSearchRequestId]);
+
+  async function searchSimilarProductsByImage(
+    imageUrl: string,
+    sourceProductId: string
+  ) {
+    if (!imageUrl.trim()) return;
+    const safeLimit = parseSimilarImageLimit(similarImageLimit);
+
+    setSimilarImageLoading(true);
+    setSimilarImageError(null);
+    setSimilarImageSourceUrl(imageUrl);
+    setSimilarImageSourceProductId(sourceProductId);
+    setSimilarImageLimit(String(safeLimit));
+    setSimilarImageResultLimit(safeLimit);
+    setSimilarImageResults([]);
+    setSimilarImageEmbeddingMs(null);
+    setSimilarImageModel(null);
+    setSimilarImageSearchRequestId((value) => value + 1);
+
+    try {
+      const res = await fetch("/api/vectorize-product-images/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageUrl,
+          limit: safeLimit,
+        }),
+      });
+
+      let data: SimilarImageApiResponse;
+      try {
+        data = (await res.json()) as SimilarImageApiResponse;
+      } catch {
+        data = {
+          ok: false,
+          error: `Failed to parse response (status ${res.status})`,
+        };
+      }
+
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error ?? `Request failed (status ${res.status})`);
+      }
+
+      setSimilarImageResults(
+        excludeSourceProductFromSimilarResults(data.results, sourceProductId)
+      );
+      setSimilarImageEmbeddingMs(data.embeddingDurationMs ?? null);
+      setSimilarImageModel(data.model ?? null);
+    } catch (error) {
+      setSimilarImageError(
+        error instanceof Error ? error.message : "Unknown error"
+      );
+    } finally {
+      setSimilarImageLoading(false);
+    }
+  }
+
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     setIsSubmitting(true);
     setResult(null);
+    clearSimilarImageResults();
 
     try {
       const res = await fetch("/api/chat-recommend", {
@@ -168,6 +334,13 @@ export default function ChatRecommendPage() {
     }
   }
 
+  const modalInfo = modalMatch ? extractProductInfo(modalMatch.metadata) : null;
+  const modalDisplayName = modalMatch
+    ? modalInfo?.name ?? `商品ID: ${modalMatch.productId}`
+    : null;
+  const modalImage = modalInfo?.image ?? null;
+  const modalDescription = modalMatch ? buildModalDescription(modalMatch) : "";
+
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-10 sm:px-6 lg:px-8">
       <div className="space-y-2">
@@ -194,7 +367,7 @@ export default function ChatRecommendPage() {
             />
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-3">
             <div className="space-y-2">
               <div className="text-sm font-medium">top_k</div>
               <Input
@@ -209,6 +382,17 @@ export default function ChatRecommendPage() {
               <Input
                 value={threshold}
                 onChange={(event) => setThreshold(event.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <div className="text-sm font-medium">画像類似件数 (`limit`)</div>
+              <Input
+                type="number"
+                min={MIN_SIMILAR_IMAGE_RESULT_LIMIT}
+                max={MAX_SIMILAR_IMAGE_RESULT_LIMIT}
+                step={1}
+                value={similarImageLimit}
+                onChange={(event) => setSimilarImageLimit(event.target.value)}
               />
             </div>
           </div>
@@ -470,6 +654,7 @@ export default function ChatRecommendPage() {
               <div className="space-y-0.5">
                 <div>• <strong>カテゴリブースト</strong>: 推論カテゴリと商品カテゴリが一致で+0.15、不一致で-0.1</div>
                 <div>• <strong>Cohereリランカー</strong>: Cohere Rerank API（rerank-multilingual-v3.0）で関連性を再評価。COHERE_API_KEY未設定時は無効</div>
+                <div>• <strong>画像類似検索</strong>: 商品カードの画像から `/api/vectorize-product-images/search` を呼び、近い画像の商品を再帰的に探索</div>
               </div>
             </div>
           </div>
@@ -660,6 +845,46 @@ export default function ChatRecommendPage() {
                             金額: {match.amount ? `${match.amount.toLocaleString()}円` : "-"}
                           </div>
                           <div className="mt-2 text-sm">{match.text}</div>
+                          {(() => {
+                            const { image } = extractProductInfo(match.metadata);
+                            const isSearchingThisImage =
+                              similarImageLoading &&
+                              similarImageSourceUrl === image;
+
+                            return (
+                              <>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  className="mt-3"
+                                  disabled={!image || similarImageLoading}
+                                  onClick={() => {
+                                    if (!image) return;
+                                    void searchSimilarProductsByImage(
+                                      image,
+                                      match.productId
+                                    );
+                                  }}
+                                >
+                                  {!image
+                                    ? "画像がないため検索不可"
+                                    : isSearchingThisImage
+                                      ? "類似画像を検索中..."
+                                      : "この画像に似た商品を検索"}
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="secondary"
+                                  className="mt-2"
+                                  onClick={() => openProductDetailModal(match)}
+                                >
+                                  画像と説明をみる
+                                </Button>
+                              </>
+                            );
+                          })()}
                           {match.metadata && (
                             <pre className="mt-2 whitespace-pre-wrap rounded bg-muted/50 p-2 text-xs">
                               {JSON.stringify(match.metadata, null, 2)}
@@ -675,6 +900,9 @@ export default function ChatRecommendPage() {
                         const { name, image } = extractProductInfo(match.metadata);
                         const productUrl = buildProductUrl(match.productId, match.cityCode);
                         const displayName = name || `商品ID: ${match.productId}`;
+                        const isSearchingThisImage =
+                          similarImageLoading &&
+                          similarImageSourceUrl === image;
 
                         return (
                           <div
@@ -737,6 +965,37 @@ export default function ChatRecommendPage() {
                               <div className="mt-1 text-xs text-muted-foreground">
                                 スコア: {match.score.toFixed(4)}
                               </div>
+
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="secondary"
+                                className="mt-3 w-full"
+                                onClick={() => openProductDetailModal(match)}
+                              >
+                                画像と説明をみる
+                              </Button>
+
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="mt-2 w-full"
+                                disabled={!image || similarImageLoading}
+                                onClick={() => {
+                                  if (!image) return;
+                                  void searchSimilarProductsByImage(
+                                    image,
+                                    match.productId
+                                  );
+                                }}
+                              >
+                                {!image
+                                  ? "画像がないため検索不可"
+                                  : isSearchingThisImage
+                                    ? "類似画像を検索中..."
+                                    : "この画像に似た商品を検索"}
+                              </Button>
                             </div>
                           </div>
                         );
@@ -757,6 +1016,275 @@ export default function ChatRecommendPage() {
           )}
         </Card>
       )}
+
+      {(similarImageSourceUrl || similarImageLoading) && (
+        <div ref={similarImageResultAnchorRef}>
+          <Card className="border bg-card/60 p-4 shadow-sm sm:p-6">
+            <div className="mb-3 space-y-1">
+              <div className="text-sm font-medium text-foreground">
+                画像ベクトル類似検索結果
+              </div>
+              <div className="text-xs text-muted-foreground">
+                参照商品: {similarImageSourceProductId ?? "-"} / 表示件数:{" "}
+                {similarImageResultLimit}件
+              </div>
+              <div className="break-all text-xs text-muted-foreground">
+                参照画像: {similarImageSourceUrl}
+              </div>
+              {similarImageSourceUrl && (
+                <div className="relative mt-2 aspect-[4/3] w-full max-w-sm overflow-hidden rounded-md border bg-muted">
+                  <Image
+                    src={similarImageSourceUrl}
+                    alt="参照画像"
+                    fill
+                    className="object-cover"
+                    sizes="(max-width: 640px) 100vw, 400px"
+                    onError={(event) => {
+                      const target = event.currentTarget;
+                      target.style.display = "none";
+                      const fallback = target.parentElement?.querySelector(
+                        ".source-image-fallback"
+                      );
+                      if (fallback) {
+                        (fallback as HTMLElement).style.display = "flex";
+                      }
+                    }}
+                  />
+                  <div className="source-image-fallback absolute inset-0 hidden items-center justify-center text-sm text-muted-foreground">
+                    画像を表示できません
+                  </div>
+                </div>
+              )}
+              {similarImageModel && (
+                <div className="text-xs text-muted-foreground">
+                  model: {similarImageModel}
+                  {similarImageEmbeddingMs !== null
+                    ? ` / vectorization: ${similarImageEmbeddingMs}ms`
+                    : ""}
+                </div>
+              )}
+            </div>
+
+            {similarImageLoading && (
+              <div className="rounded-md bg-muted/60 px-3 py-2 text-sm text-muted-foreground">
+                類似画像を検索しています...
+              </div>
+            )}
+
+            {!similarImageLoading && similarImageError && (
+              <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {similarImageError}
+              </div>
+            )}
+
+            {!similarImageLoading &&
+              !similarImageError &&
+              similarImageResults.length === 0 && (
+                <div className="rounded-md bg-muted/60 px-3 py-2 text-sm text-muted-foreground">
+                  類似結果がありません。
+                </div>
+              )}
+
+            {!similarImageLoading &&
+              !similarImageError &&
+              similarImageResults.length > 0 && (
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {similarImageResults.map((row) => {
+                    const { name, image } = extractProductInfo(row.metadata);
+                    const displayImage = image ?? row.image_url;
+                    const sourceImageUrl = row.image_url || displayImage || "";
+                    const sourceProductId = row.product_id ?? row.id;
+                    const displayName = row.product_id
+                      ? name ?? `商品ID: ${row.product_id}`
+                      : name ?? `ID: ${row.id}`;
+                    const productUrl = buildProductUrlForVectorResult(
+                      row.product_id,
+                      row.city_code,
+                      row.image_url
+                    );
+                    const hasDifferentSearchImage =
+                      sourceImageUrl.length > 0 &&
+                      displayImage &&
+                      sourceImageUrl !== displayImage;
+                    const isSearchingThisImage =
+                      similarImageLoading &&
+                      sourceImageUrl.length > 0 &&
+                      similarImageSourceUrl === sourceImageUrl;
+
+                    return (
+                      <div
+                        key={row.id}
+                        className="overflow-hidden rounded-lg border bg-background/70 shadow-sm transition-shadow hover:shadow-md"
+                      >
+                        <div className="relative aspect-[4/3] bg-muted">
+                          {displayImage ? (
+                            <Image
+                              src={displayImage}
+                              alt={displayName}
+                              fill
+                              className="object-cover"
+                              sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+                              onError={(event) => {
+                                const target = event.currentTarget;
+                                target.style.display = "none";
+                                const fallback =
+                                  target.parentElement?.querySelector(".image-fallback");
+                                if (fallback) {
+                                  (fallback as HTMLElement).style.display = "flex";
+                                }
+                              }}
+                            />
+                          ) : null}
+                          <div
+                            className={`image-fallback absolute inset-0 items-center justify-center bg-muted text-sm text-muted-foreground ${
+                              displayImage ? "hidden" : "flex"
+                            }`}
+                          >
+                            画像なし
+                          </div>
+                        </div>
+                        <div className="p-3">
+                          <a
+                            href={productUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="line-clamp-2 text-sm font-medium hover:text-primary hover:underline"
+                            title={displayName}
+                          >
+                            {displayName}
+                            <span className="ml-1 inline-block text-xs text-muted-foreground">
+                              ↗
+                            </span>
+                          </a>
+
+                          <div className="mt-2 text-lg font-bold text-primary">
+                            {row.amount != null
+                              ? `${row.amount.toLocaleString()}円`
+                              : "金額未設定"}
+                          </div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            距離: {row.distance.toFixed(4)}
+                          </div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            productId: {row.product_id ?? "-"}
+                          </div>
+                          {hasDifferentSearchImage && (
+                            <div className="mt-2 flex items-center gap-2 rounded-md border bg-muted/40 p-2">
+                              <div className="relative h-12 w-12 flex-none overflow-hidden rounded bg-muted">
+                                <Image
+                                  src={sourceImageUrl}
+                                  alt="検索対象画像"
+                                  fill
+                                  className="object-cover"
+                                  sizes="48px"
+                                  onError={(event) => {
+                                    const target = event.currentTarget;
+                                    target.style.display = "none";
+                                    const fallback = target.parentElement?.querySelector(
+                                      ".source-image-fallback"
+                                    );
+                                    if (fallback) {
+                                      (fallback as HTMLElement).style.display = "flex";
+                                    }
+                                  }}
+                                />
+                                <div className="source-image-fallback absolute inset-0 hidden items-center justify-center text-[10px] text-muted-foreground">
+                                  画像なし
+                                </div>
+                              </div>
+                              <div className="text-xs text-muted-foreground">
+                                検索対象の画像
+                              </div>
+                            </div>
+                          )}
+
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="secondary"
+                            className="mt-3 w-full"
+                            onClick={() =>
+                              openProductDetailModal(
+                                buildModalMatchFromSimilarResult(row)
+                              )
+                            }
+                          >
+                            画像と説明をみる
+                          </Button>
+
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="mt-2 w-full"
+                            disabled={
+                              sourceImageUrl.length === 0 || similarImageLoading
+                            }
+                            onClick={() => {
+                              if (!sourceImageUrl) return;
+                              void searchSimilarProductsByImage(
+                                sourceImageUrl,
+                                sourceProductId
+                              );
+                            }}
+                          >
+                            {sourceImageUrl.length === 0
+                              ? "画像がないため検索不可"
+                              : isSearchingThisImage
+                                ? "類似画像を検索中..."
+                                : "この画像に似た商品を検索"}
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+          </Card>
+        </div>
+      )}
+
+      <Dialog open={!!modalMatch} onOpenChange={handleModalOpenChange}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{modalDisplayName ?? "商品詳細"}</DialogTitle>
+            <DialogDescription>
+              商品画像と説明文を確認できます。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="relative aspect-[4/3] overflow-hidden rounded-md border bg-muted">
+              {modalImage ? (
+                <Image
+                  src={modalImage}
+                  alt={modalDisplayName ?? "商品画像"}
+                  fill
+                  className="object-cover"
+                  sizes="(max-width: 640px) 100vw, 720px"
+                />
+              ) : (
+                <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
+                  画像なし
+                </div>
+              )}
+            </div>
+            {modalMatch && (
+              <div className="space-y-2 text-sm">
+                <div className="text-muted-foreground">
+                  商品ID: {modalMatch.productId} / 市町村コード: {modalMatch.cityCode ?? "-"}
+                </div>
+                <div className="text-muted-foreground">
+                  金額:{" "}
+                  {modalMatch.amount ? `${modalMatch.amount.toLocaleString()}円` : "金額未設定"}
+                </div>
+                <div className="whitespace-pre-wrap leading-relaxed">
+                  {modalDescription}
+                </div>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

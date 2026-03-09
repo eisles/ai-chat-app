@@ -18,6 +18,15 @@ import type {
   ConversationStepKey,
   SlotState,
 } from "@/lib/recommend-conversation/types";
+import {
+  buildProductUrlForVectorResult,
+  DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT,
+  excludeSourceProductFromSimilarResults,
+  MAX_SIMILAR_IMAGE_RESULT_LIMIT,
+  MIN_SIMILAR_IMAGE_RESULT_LIMIT,
+  parseSimilarImageLimit,
+} from "@/lib/similar-image-search";
+import type { SimilarImageResult } from "@/lib/similar-image-search";
 import { Loader2Icon } from "lucide-react";
 import Image from "next/image";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -96,17 +105,6 @@ type Match = {
   personalReasons?: string[];
 };
 
-type SimilarImageResult = {
-  id: string;
-  city_code: string | null;
-  product_id: string | null;
-  slide_index: number | null;
-  image_url: string;
-  distance: number;
-  metadata: Record<string, unknown> | null;
-  amount: number | null;
-};
-
 type ApiResponse = {
   ok: boolean;
   action?: "ask" | "recommend";
@@ -181,9 +179,6 @@ type ClickPayload = {
   metadata?: Record<string, unknown> | null;
 };
 
-const DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT = 20;
-const MIN_SIMILAR_IMAGE_RESULT_LIMIT = 1;
-const MAX_SIMILAR_IMAGE_RESULT_LIMIT = 100;
 const AUTO_RELAX_STORAGE_KEY = "recommend_assistant_auto_relax";
 
 const FIELD_LABELS: Record<string, string> = {
@@ -344,32 +339,6 @@ function buildSlotSummary(slots: SlotState): string[] {
   return summary;
 }
 
-function buildProductUrlForVectorResult(
-  productId: string | null,
-  cityCode: string | null,
-  fallbackUrl: string
-): string {
-  if (productId && cityCode) {
-    return `https://www.furusato-tax.jp/product/detail/${cityCode}/${productId}`;
-  }
-  if (productId) {
-    return `https://www.furusato-tax.jp/search?q=${productId}`;
-  }
-  return fallbackUrl;
-}
-
-function parseSimilarImageLimit(input: string): number {
-  const trimmed = input.trim();
-  if (!trimmed) return DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT;
-  const parsed = Number(trimmed);
-  if (!Number.isFinite(parsed)) return DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT;
-  const intValue = Math.floor(parsed);
-  return Math.max(
-    MIN_SIMILAR_IMAGE_RESULT_LIMIT,
-    Math.min(intValue, MAX_SIMILAR_IMAGE_RESULT_LIMIT)
-  );
-}
-
 function buildModalDescription(match: Match): string {
   const info = extractProductInfo(match.metadata);
   if (info.description) return info.description;
@@ -388,16 +357,6 @@ function buildModalMatchFromSimilarResult(row: SimilarImageResult): Match {
     score: Math.max(0, 1 - row.distance),
     amount: row.amount,
   };
-}
-
-function excludeSourceProductFromSimilarResults(
-  results: SimilarImageResult[] | undefined,
-  sourceProductId: string
-): SimilarImageResult[] {
-  if (!results || results.length === 0) return [];
-  const trimmedSourceProductId = sourceProductId.trim();
-  if (!trimmedSourceProductId) return results;
-  return results.filter((row) => row.product_id !== trimmedSourceProductId);
 }
 
 function formatAgentSearchStrategy(
