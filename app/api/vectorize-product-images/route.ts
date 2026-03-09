@@ -1,5 +1,5 @@
 import {
-  embedWithVectorizeApi,
+  embedOrReuseImageEmbedding,
   upsertProductImagesVectorize,
 } from "@/lib/vectorize-product-images";
 
@@ -19,8 +19,16 @@ export async function POST(req: Request) {
   const targetCityCode = cityCode ?? null;
 
   try {
-    const { vector, durationMs, byteSize, model, dim, normalized } =
-      await embedWithVectorizeApi(targetImageUrl);
+    const {
+      vector,
+      durationMs,
+      byteSize,
+      model,
+      dim,
+      normalized,
+      source,
+      reusedFrom,
+    } = await embedOrReuseImageEmbedding(targetImageUrl);
     await upsertProductImagesVectorize({
       productId: targetProductId,
       cityCode: targetCityCode,
@@ -44,6 +52,8 @@ export async function POST(req: Request) {
       embeddingLength: vector.length,
       embeddingByteSize: byteSize,
       embeddingDurationMs: durationMs,
+      embeddingSource: source,
+      embeddingReusedFrom: reusedFrom,
       model,
       dim,
       normalized,

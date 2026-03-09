@@ -54,10 +54,11 @@ Route Handler は薄く保ち、機能ロジックは `lib/*` の engine / servi
 - ベクトル検索は Postgres + pgvector を採用し、API ルートで同期処理する
 - 推薦系は `app/api/recommend/*` と `lib/recommend*` で責務分離し、会話進行・検索・個人化をモジュール化する
 - スキーマ変更は破壊的変更より加算型マイグレーションを優先し、運用時の互換性を維持する
+- プレビュー/検証環境の保護は `proxy.ts` で行い、環境変数が片方だけ設定された場合は 500 で fail-closed にする
 
 ---
 _Document standards and patterns, not every dependency_
 
 ## 更新履歴
-- updated_at: 2026-03-04
-- 変更理由: 推薦機能のレイヤ分離と SQL マイグレーション運用パターンを反映
+- updated_at: 2026-03-09
+- 変更理由: `proxy.ts` を使った全体ガードの運用パターンを追加

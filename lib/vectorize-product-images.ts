@@ -1,7 +1,7 @@
 import { getDb } from "@/lib/neon";
 import { randomBytes } from "crypto";
 
-type ImageVector = {
+export type ImageVector = {
   vector: number[];
   durationMs: number;
   byteSize: number;
@@ -10,9 +10,19 @@ type ImageVector = {
   normalized: boolean | null;
 };
 
+export type ImageEmbeddingSource = "stored_image_url" | "vectorize_api";
+
+export type ResolvedImageVector = ImageVector & {
+  source: ImageEmbeddingSource;
+  reusedFrom: {
+    productId: string;
+    slideIndex: number;
+  } | null;
+};
+
 type SlideVector = {
   url: string | null;
-  embedding: ImageVector | null;
+  embedding: ResolvedImageVector | null;
   slideIndex: number;
 };
 
@@ -20,6 +30,8 @@ const DEFAULT_VECTORIZE_ENDPOINT = "https://convertvectorapi.onrender.com/vector
 const VECTORIZE_ENDPOINT =
   process.env.VECTORIZE_ENDPOINT ?? DEFAULT_VECTORIZE_ENDPOINT;
 const TARGET_DIM = 512;
+let productImagesVectorizeInitPromise: Promise<ReturnType<typeof getDb>> | null =
+  null;
 
 function generateUuidV7() {
   let timeMs = Date.now();
@@ -38,6 +50,7 @@ function generateUuidV7() {
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
+
 async function downloadImageAsBlob(url: string) {
   const res = await fetch(url);
   if (!res.ok) {
@@ -107,36 +120,137 @@ export async function embedWithVectorizeApi(imageUrl: string) {
 
 async function ensureProductImagesVectorizeTable() {
   const db = getDb();
-  await db`create extension if not exists vector`;
-  await db`
-    create table if not exists public.product_images_vectorize (
-      id uuid primary key,
-      city_code varchar(10),
-      product_id varchar(20) not null,
-      slide_index integer not null default 0,
-      image_url text,
-      embedding vector(512),
-      embedding_length integer,
-      embedding_bytes integer,
-      embedding_ms integer,
-      model text,
-      dim integer,
-      normalized boolean,
-      created_at timestamptz default now(),
-      updated_at timestamptz default now()
-    );
-  `;
+  if (productImagesVectorizeInitPromise) {
+    return productImagesVectorizeInitPromise;
+  }
 
-  await db`
-    alter table public.product_images_vectorize
-    add column if not exists slide_index integer not null default 0
-  `;
+  productImagesVectorizeInitPromise = (async () => {
+    try {
+      await db`create extension if not exists vector`;
+      await db`
+        create table if not exists public.product_images_vectorize (
+          id uuid primary key,
+          city_code varchar(10),
+          product_id varchar(20) not null,
+          slide_index integer not null default 0,
+          image_url text,
+          embedding vector(512),
+          embedding_length integer,
+          embedding_bytes integer,
+          embedding_ms integer,
+          model text,
+          dim integer,
+          normalized boolean,
+          created_at timestamptz default now(),
+          updated_at timestamptz default now()
+        );
+      `;
 
-  return db;
+      await db`
+        alter table public.product_images_vectorize
+        add column if not exists slide_index integer not null default 0
+      `;
+
+      return db;
+    } catch (error) {
+      productImagesVectorizeInitPromise = null;
+      throw error;
+    }
+  })();
+
+  return productImagesVectorizeInitPromise;
 }
 
 export async function ensureProductImagesVectorizeInitialized() {
   await ensureProductImagesVectorizeTable();
+}
+
+function parseStoredVectorLiteral(value: string | null | undefined): number[] | null {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) {
+      return null;
+    }
+    const vector = parsed.map((item) => Number(item));
+    return vector.every((item) => Number.isFinite(item)) ? vector : null;
+  } catch {
+    return null;
+  }
+}
+
+async function findStoredImageEmbeddingByUrl(
+  imageUrl: string,
+  options?: { ensureTable?: boolean }
+): Promise<ResolvedImageVector | null> {
+  const db = options?.ensureTable === false
+    ? getDb()
+    : await ensureProductImagesVectorizeTable();
+  const rows = (await db`
+    select
+      embedding::text as embedding_text,
+      embedding_ms,
+      embedding_bytes,
+      model,
+      dim,
+      normalized,
+      product_id,
+      slide_index
+    from public.product_images_vectorize
+    where image_url = ${imageUrl}
+      and embedding is not null
+    order by updated_at desc nulls last
+    limit 1
+  `) as Array<{
+    embedding_text: string | null;
+    embedding_ms: number | null;
+    embedding_bytes: number | null;
+    model: string | null;
+    dim: number | null;
+    normalized: boolean | null;
+    product_id: string;
+    slide_index: number;
+  }>;
+
+  const row = rows[0];
+  const vector = parseStoredVectorLiteral(row?.embedding_text);
+  if (!row || !vector) {
+    return null;
+  }
+
+  return {
+    vector,
+    durationMs: row.embedding_ms ?? 0,
+    byteSize: row.embedding_bytes ?? vector.length * 4,
+    model: row.model ?? "unknown",
+    dim: row.dim ?? vector.length,
+    normalized: row.normalized ?? null,
+    source: "stored_image_url",
+    reusedFrom: {
+      productId: row.product_id,
+      slideIndex: row.slide_index,
+    },
+  };
+}
+
+export async function embedOrReuseImageEmbedding(
+  imageUrl: string,
+  options?: { ensureTable?: boolean }
+): Promise<ResolvedImageVector> {
+  const stored = await findStoredImageEmbeddingByUrl(imageUrl, options);
+  if (stored) {
+    return stored;
+  }
+
+  const embedded = await embedWithVectorizeApi(imageUrl);
+  return {
+    ...embedded,
+    source: "vectorize_api",
+    reusedFrom: null,
+  };
 }
 
 function vectorLiteral(vector?: number[] | null) {
@@ -238,7 +352,7 @@ export async function vectorizeProductImages(options: {
   }
 
   const mainEmbedding = options.imageUrl
-    ? await embedWithVectorizeApi(options.imageUrl)
+    ? await embedOrReuseImageEmbedding(options.imageUrl)
     : null;
 
   const slides: SlideVector[] = [];
@@ -248,7 +362,7 @@ export async function vectorizeProductImages(options: {
       slides.push({ url: null, embedding: null, slideIndex: index + 1 });
       continue;
     }
-    const embedding = await embedWithVectorizeApi(url);
+    const embedding = await embedOrReuseImageEmbedding(url);
     slides.push({ url, embedding, slideIndex: index + 1 });
   }
 

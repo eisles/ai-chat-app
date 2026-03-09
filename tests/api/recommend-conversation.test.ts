@@ -53,6 +53,14 @@ vi.mock("@/lib/recommend-personalization/repository", () => ({
 
 const { POST } = await import("@/app/api/recommend/conversation/route");
 
+function parseNdjson(text: string) {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
 describe("POST /api/recommend/conversation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -87,6 +95,10 @@ describe("POST /api/recommend/conversation", () => {
     expect(json.nextQuestionKey).toBe("purpose");
     expect(json.missingKeys).toContain("purpose");
     expect(json.quickReplies).toContain("自宅用");
+    expect(json.debugInfo).toMatchObject({
+      actionPath: "ask",
+      extractionSkipped: false,
+    });
   });
 
   it("5ステップが充足した場合は recommend を返す", async () => {
@@ -140,6 +152,34 @@ describe("POST /api/recommend/conversation", () => {
     expect(json.action).toBe("recommend");
     expect(json.matches).toHaveLength(1);
     expect(json.queryText).toContain("カテゴリ: 魚介");
+    expect(json.debugInfo).toMatchObject({
+      actionPath: "recommend",
+      extractionSkipped: false,
+    });
+    expect(json.debugInfo.recommendation).toMatchObject({
+      counts: {
+        rawMatches: 1,
+        budgetFiltered: 1,
+        categoryFiltered: 1,
+        deliveryFiltered: 1,
+      },
+      personalization: {
+        attempted: false,
+        profileBuilt: false,
+        applied: false,
+        useLlmPersonalization: false,
+      },
+    });
+    expect(
+      json.debugInfo.timings.some(
+        (step: { name: string }) => step.name === "extract_slots"
+      )
+    ).toBe(true);
+    expect(
+      json.debugInfo.timings.some(
+        (step: { name: string }) => step.name === "recommend_by_answers"
+      )
+    ).toBe(true);
     expect(searchTextEmbeddings).toHaveBeenCalledWith({
       embedding: [0.1, 0.2],
       topK: 10,
@@ -505,6 +545,12 @@ describe("POST /api/recommend/conversation", () => {
     expect(json.nextQuestionKey).toBe("delivery");
     expect(json.quickReplies[0]).toBe("特になし");
     expect(json.session.slots.category).toBe("米・パン");
+    expect(json.debugInfo).toMatchObject({
+      actionPath: "ask",
+      extractionSkipped: true,
+      selectedStepKey: "category",
+    });
+    expect(createCompletion).not.toHaveBeenCalled();
   });
 
   it("旅行・体験系カテゴリなら配送質問をスキップして追加条件へ進む", async () => {
@@ -537,6 +583,160 @@ describe("POST /api/recommend/conversation", () => {
     expect(json.nextQuestionKey).toBe("additional");
     expect(json.quickReplies).toContain("特になし");
     expect(json.session.slots.category).toBe("旅行・体験");
+    expect(createCompletion).not.toHaveBeenCalled();
+  });
+
+  it("最後の選択肢入力をクイック選択した場合はLLM抽出なしで recommend へ進む", async () => {
+    generateTextEmbedding.mockResolvedValue({
+      vector: [0.1, 0.2],
+      model: "text-embedding-test",
+      dim: 2,
+      normalized: null,
+      durationMs: 12,
+      byteSize: 8,
+    });
+    searchTextEmbeddings.mockResolvedValue([
+      {
+        id: "id-quick-final-1",
+        productId: "p-quick-final-1",
+        cityCode: null,
+        text: "テスト",
+        metadata: {
+          raw: {
+            amount: 12000,
+            shipping_frozen_flag: 1,
+            categories: [
+              {
+                category1_name: "米・パン",
+                category2_name: null,
+                category3_name: null,
+              },
+            ],
+          },
+        },
+        score: 0.91,
+        amount: 12000,
+      },
+    ]);
+
+    const req = new Request("http://localhost/api/recommend/conversation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "米・パン",
+        selectedStepKey: "additional",
+        selectedValue: "特になし",
+        session: {
+          slots: {
+            purpose: "自宅用",
+            budget: "10,001〜20,000円",
+            category: "米・パン",
+            delivery: ["冷凍"],
+          },
+          askedKeys: ["purpose", "budget", "category", "delivery"],
+        },
+      }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(json.action).toBe("recommend");
+    expect(json.matches).toHaveLength(1);
+    expect(json.session.slots.category).toBe("米・パン");
+    expect(json.debugInfo).toMatchObject({
+      actionPath: "recommend",
+      extractionSkipped: true,
+      selectedStepKey: "additional",
+    });
+    expect(createCompletion).not.toHaveBeenCalled();
+  });
+
+  it("streamProgress=true の場合は実際の進捗イベントと最終結果を返す", async () => {
+    createCompletion.mockResolvedValue({
+      content:
+        "{\"budget\":\"10,001〜20,000円\",\"category\":\"魚介\",\"purpose\":\"自宅用\",\"delivery\":[\"冷凍\"],\"allergen\":\"なし\"}",
+    });
+    generateTextEmbedding.mockResolvedValue({
+      vector: [0.1, 0.2],
+      model: "text-embedding-test",
+      dim: 2,
+      normalized: null,
+      durationMs: 12,
+      byteSize: 8,
+    });
+    searchTextEmbeddings.mockResolvedValue([
+      {
+        id: "id-stream-1",
+        productId: "p-stream-1",
+        cityCode: null,
+        text: "テスト",
+        metadata: {
+          raw: {
+            amount: 12000,
+            shipping_frozen_flag: 1,
+            categories: [
+              {
+                category1_name: "魚介",
+                category2_name: null,
+                category3_name: null,
+              },
+            ],
+          },
+        },
+        score: 0.91,
+        amount: 12000,
+      },
+    ]);
+
+    const req = new Request("http://localhost/api/recommend/conversation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "1万円前後で魚介が欲しい",
+        streamProgress: true,
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.text();
+    const events = parseNdjson(body);
+
+    expect(res.headers.get("content-type")).toContain("application/x-ndjson");
+    expect(
+      events.some(
+        (event) =>
+          event.type === "progress" &&
+          event.stage === "recommend_generate_text_embedding"
+      )
+    ).toBe(true);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "progress" &&
+          event.stage === "recommend_search_text_embeddings"
+      )
+    ).toBe(true);
+    const resultEvent = events.find((event) => event.type === "result") as
+      | {
+          data?: {
+            action?: string;
+            debugInfo?: {
+              recommendation?: {
+                timings?: Array<{ name: string }>;
+              };
+            };
+          };
+        }
+      | undefined;
+    expect(resultEvent?.data?.action).toBe("recommend");
+    expect(
+      resultEvent?.data?.debugInfo?.recommendation?.timings?.some(
+        (timing) => timing.name === "generate_text_embedding"
+      )
+    ).toBe(true);
   });
 
   it("公開済み設定がある場合は質問文と選択肢に反映される", async () => {
@@ -631,12 +831,58 @@ describe("POST /api/recommend/conversation", () => {
     recommendByAnswers.mockResolvedValueOnce({
       queryText: "テスト",
       budgetRange: null,
+      fallbackInfo: {
+        enabled: true,
+        applied: false,
+        reason: null,
+        relaxedConditions: [],
+        strictMatchCount: 0,
+        relaxedMatchCount: 0,
+      },
       matches: [],
+      debugInfo: {
+        timings: [],
+        counts: {
+          rawMatches: 0,
+          budgetFiltered: 0,
+          categoryFiltered: 0,
+          deliveryFiltered: 0,
+        },
+        personalization: {
+          attempted: false,
+          profileBuilt: false,
+          applied: false,
+          useLlmPersonalization: false,
+        },
+      },
     });
     recommendByAnswers.mockResolvedValueOnce({
       queryText: "テスト",
       budgetRange: null,
+      fallbackInfo: {
+        enabled: true,
+        applied: false,
+        reason: null,
+        relaxedConditions: [],
+        strictMatchCount: 0,
+        relaxedMatchCount: 0,
+      },
       matches: [],
+      debugInfo: {
+        timings: [],
+        counts: {
+          rawMatches: 0,
+          budgetFiltered: 0,
+          categoryFiltered: 0,
+          deliveryFiltered: 0,
+        },
+        personalization: {
+          attempted: false,
+          profileBuilt: false,
+          applied: false,
+          useLlmPersonalization: false,
+        },
+      },
     });
 
     createCompletion.mockResolvedValue({

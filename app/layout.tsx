@@ -35,6 +35,7 @@ const navSections = [
     links: [
       { href: "/text-registration", label: "文字情報登録" },
       { href: "/text-info-list", label: "文字情報一覧" },
+      { href: "/product-images-vectorize/maintenance", label: "画像ベクトル管理" },
       { href: "/product-json-import", label: "商品JSON取り込み" },
       { href: "/product-json-import-v2", label: "商品JSON取り込み(v2)" },
       { href: "/recommend-assistant-settings", label: "対話型レコメンド設定" },

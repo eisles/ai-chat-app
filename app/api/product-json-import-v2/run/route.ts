@@ -24,7 +24,7 @@ import {
 import {
   deleteProductImagesVectorize,
   checkExistingProductImagesVectorize,
-  embedWithVectorizeApi,
+  embedOrReuseImageEmbedding,
   getExistingVectorizedProductIds,
   upsertProductImagesVectorize,
 } from "@/lib/vectorize-product-images";
@@ -481,7 +481,7 @@ async function processProductItem(options: {
       if (mainUrl && mainUrl.trim()) {
         vectorTasks.push(async () => {
           await timeStep("vectorize_main", async () => {
-            const embedding = await embedWithVectorizeApi(mainUrl);
+            const embedding = await embedOrReuseImageEmbedding(mainUrl);
             await upsertProductImagesVectorize({
               productId,
               cityCode: product.city_code ?? null,
@@ -499,7 +499,7 @@ async function processProductItem(options: {
         const slideIndex = i + 1;
         vectorTasks.push(async () => {
           await timeStep(`vectorize_slide_${slideIndex}`, async () => {
-            const embedding = await embedWithVectorizeApi(url);
+            const embedding = await embedOrReuseImageEmbedding(url);
             await upsertProductImagesVectorize({
               productId,
               cityCode: product.city_code ?? null,

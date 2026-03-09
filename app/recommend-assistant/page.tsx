@@ -117,8 +117,59 @@ type ApiResponse = {
   matches?: Match[];
   budgetRange?: BudgetRange | null;
   fallbackInfo?: FallbackInfo;
+  debugInfo?: ConversationDebugInfo;
   error?: string;
 };
+
+type ConversationDebugInfo = {
+  actionPath: "ask" | "recommend";
+  extractionSkipped: boolean;
+  selectedStepKey: ConversationStepKey | null;
+  totalDurationMs: number;
+  timings: Array<{
+    name: string;
+    durationMs: number;
+  }>;
+  recommendation?: {
+    timings: Array<{
+      name: string;
+      durationMs: number;
+    }>;
+    counts: {
+      rawMatches: number;
+      budgetFiltered: number;
+      categoryFiltered: number;
+      deliveryFiltered: number;
+    };
+    personalization: {
+      attempted: boolean;
+      profileBuilt: boolean;
+      applied: boolean;
+      useLlmPersonalization: boolean;
+    };
+  };
+};
+
+type ConversationProgressState = {
+  stage: string;
+  label: string;
+};
+
+type ConversationStreamEvent =
+  | {
+      type: "progress";
+      stage: string;
+      label: string;
+    }
+  | {
+      type: "result";
+      data: ApiResponse;
+    }
+  | {
+      type: "error";
+      error: string;
+      status?: number;
+    };
 
 type SimilarImageApiResponse = {
   ok: boolean;
@@ -195,6 +246,80 @@ const AGENT_LOADING_STAGES = [
   "現在条件との整合を確認しています",
   "おすすめ候補を整理しています",
 ];
+
+async function readConversationApiResponse(
+  response: Response,
+  onProgress: (state: ConversationProgressState) => void
+): Promise<ApiResponse> {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/x-ndjson") || !response.body) {
+    try {
+      return (await response.json()) as ApiResponse;
+    } catch {
+      return {
+        ok: false,
+        error: `Failed to parse response (status ${response.status})`,
+      };
+    }
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result: ApiResponse | null = null;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      const event = JSON.parse(trimmed) as ConversationStreamEvent;
+      if (event.type === "progress") {
+        onProgress({
+          stage: event.stage,
+          label: event.label,
+        });
+        continue;
+      }
+      if (event.type === "error") {
+        throw new Error(
+          event.error ??
+            `Request failed${event.status ? ` (status ${event.status})` : ""}`
+        );
+      }
+      result = event.data;
+    }
+
+    if (done) break;
+  }
+
+  if (buffer.trim()) {
+    const event = JSON.parse(buffer.trim()) as ConversationStreamEvent;
+    if (event.type === "progress") {
+      onProgress({
+        stage: event.stage,
+        label: event.label,
+      });
+    } else if (event.type === "error") {
+      throw new Error(
+        event.error ?? `Request failed${event.status ? ` (status ${event.status})` : ""}`
+      );
+    } else {
+      result = event.data;
+    }
+  }
+
+  if (!result) {
+    throw new Error(`Failed to parse response (status ${response.status})`);
+  }
+  return result;
+}
 
 type InitialState = {
   messages: Message[];
@@ -434,6 +559,10 @@ export default function RecommendAssistantPage() {
   );
   const [displayMode, setDisplayMode] = useState<"debug" | "product">("product");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [conversationProgress, setConversationProgress] =
+    useState<ConversationProgressState | null>(null);
+  const [conversationDebugInfo, setConversationDebugInfo] =
+    useState<ConversationDebugInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [allowCategoryFallback, setAllowCategoryFallback] = useState(true);
   const [fallbackInfo, setFallbackInfo] = useState<FallbackInfo | null>(null);
@@ -599,6 +728,8 @@ export default function RecommendAssistantPage() {
       setInput("");
     }
     setError(null);
+    setConversationDebugInfo(null);
+    setConversationProgress(null);
     setHasInteracted(true);
     if (shouldAppendUserMessage) {
       setMessages((prev) => [...prev, { role: "user", text: userText }]);
@@ -620,21 +751,20 @@ export default function RecommendAssistantPage() {
             options?.allowCategoryFallbackOverride ?? allowCategoryFallback,
           userId: recommendUserId ?? undefined,
           useLlmPersonalization,
+          streamProgress: true,
         }),
       });
 
-      let data: ApiResponse;
-      try {
-        data = (await res.json()) as ApiResponse;
-      } catch {
-        data = { ok: false, error: `Failed to parse response (status ${res.status})` };
-      }
+      const data = await readConversationApiResponse(res, (state) => {
+        setConversationProgress(state);
+      });
 
       if (!res.ok || !data.ok) {
         throw new Error(data.error ?? `Request failed (status ${res.status})`);
       }
 
       const assistantMessage = data.assistantMessage ?? "";
+      setConversationDebugInfo(data.debugInfo ?? null);
       setSession((prev) => data.session ?? prev);
       setMissingKeys(data.missingKeys ?? []);
       setNextQuestionKey(data.nextQuestionKey ?? null);
@@ -683,6 +813,7 @@ export default function RecommendAssistantPage() {
       ]);
     } finally {
       setIsSubmitting(false);
+      setConversationProgress(null);
     }
   }
 
@@ -1057,8 +1188,120 @@ export default function RecommendAssistantPage() {
           </form>
 
           {error && <div className="text-sm text-destructive">{error}</div>}
+          {isSubmitting && (
+            <div className="rounded-md border bg-muted/40 px-3 py-3">
+              <div className="text-sm text-foreground">送信中の処理</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {conversationProgress?.label ?? "処理を開始しています"}
+              </div>
+              {conversationProgress?.stage && (
+                <div className="mt-1 text-[11px] text-muted-foreground">
+                  stage: {conversationProgress.stage}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </Card>
+
+      {(conversationDebugInfo || isSubmitting || conversationProgress) && (
+        <Card className="border bg-card/60 p-4 text-sm text-muted-foreground shadow-sm">
+          <div className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+            送信デバッグ
+          </div>
+          {isSubmitting && (
+            <div className="mt-2 rounded bg-muted/60 px-3 py-2 text-xs">
+              実際の進捗イベントを表示しています。
+              {conversationProgress?.label
+                ? ` 現在: ${conversationProgress.label}`
+                : " API から最初の進捗を待っています。"}
+            </div>
+          )}
+          {conversationDebugInfo ? (
+            <div className="mt-3 space-y-3">
+              <div>
+                total: {conversationDebugInfo.totalDurationMs} ms / path:{" "}
+                {conversationDebugInfo.actionPath}
+              </div>
+              <div>
+                extractionSkipped:{" "}
+                {conversationDebugInfo.extractionSkipped ? "true" : "false"}
+                {conversationDebugInfo.selectedStepKey
+                  ? ` / selectedStepKey: ${conversationDebugInfo.selectedStepKey}`
+                  : ""}
+              </div>
+              <div className="space-y-1">
+                {conversationDebugInfo.timings.map((timing) => (
+                  <div
+                    key={`${timing.name}-${timing.durationMs}`}
+                    className="flex items-center justify-between rounded bg-muted/50 px-2 py-1 text-xs"
+                  >
+                    <span>{timing.name}</span>
+                    <span>{timing.durationMs} ms</span>
+                  </div>
+                ))}
+              </div>
+              {conversationDebugInfo.recommendation && (
+                <div className="space-y-2 rounded border bg-muted/30 p-3">
+                  <div className="text-xs font-medium text-foreground">
+                    recommend_by_answers 内訳
+                  </div>
+                  <div className="grid gap-2 text-xs sm:grid-cols-2">
+                    <div>
+                      rawMatches:{" "}
+                      {conversationDebugInfo.recommendation.counts.rawMatches}
+                    </div>
+                    <div>
+                      budgetFiltered:{" "}
+                      {conversationDebugInfo.recommendation.counts.budgetFiltered}
+                    </div>
+                    <div>
+                      categoryFiltered:{" "}
+                      {conversationDebugInfo.recommendation.counts.categoryFiltered}
+                    </div>
+                    <div>
+                      deliveryFiltered:{" "}
+                      {conversationDebugInfo.recommendation.counts.deliveryFiltered}
+                    </div>
+                  </div>
+                  <div className="text-xs">
+                    personalization: attempted=
+                    {conversationDebugInfo.recommendation.personalization.attempted
+                      ? "true"
+                      : "false"}
+                    {" / "}profileBuilt=
+                    {conversationDebugInfo.recommendation.personalization.profileBuilt
+                      ? "true"
+                      : "false"}
+                    {" / "}applied=
+                    {conversationDebugInfo.recommendation.personalization.applied
+                      ? "true"
+                      : "false"}
+                    {" / "}useLlm=
+                    {conversationDebugInfo.recommendation.personalization
+                      .useLlmPersonalization
+                      ? "true"
+                      : "false"}
+                  </div>
+                  <div className="space-y-1">
+                    {conversationDebugInfo.recommendation.timings.map((timing) => (
+                      <div
+                        key={`${timing.name}-${timing.durationMs}`}
+                        className="flex items-center justify-between rounded bg-muted/50 px-2 py-1 text-xs"
+                      >
+                        <span>{timing.name}</span>
+                        <span>{timing.durationMs} ms</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="mt-2 text-xs">まだ実測値はありません。</div>
+          )}
+        </Card>
+      )}
 
       {slotSummary.length > 0 && (
         <Card className="border bg-card/60 p-4 text-sm text-muted-foreground shadow-sm">

@@ -41,6 +41,11 @@ Next.js App Router を中心に、ページ/機能単位でディレクトリを
 **Purpose**: API ルートの統合テスト  
 **Example**: `/tests/api/image-search.test.ts`
 
+### Request Guard
+**Location**: `/proxy.ts`  
+**Purpose**: 環境変数が揃った場合のみ全体を Basic 認証で保護し、片側設定は 500 で fail-closed  
+**Example**: `/proxy.ts`（`lib/basic-auth` を参照）
+
 ## Naming Conventions
 
 - **Files**: 小文字・ケバブ/単語区切り（`image-search`, `text-registration`）

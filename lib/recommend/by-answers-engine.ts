@@ -9,6 +9,38 @@ import { buildUserPreferenceProfile } from "@/lib/recommend-personalization/prof
 const DEFAULT_TOP_K = 10;
 const DEFAULT_THRESHOLD = 0.3;
 
+export type RecommendByAnswersProgressStage =
+  | "build_query_text"
+  | "generate_text_embedding"
+  | "search_text_embeddings"
+  | "filter_budget"
+  | "filter_category"
+  | "filter_delivery"
+  | "build_user_preference_profile"
+  | "apply_personalization"
+  | "complete";
+
+export type RecommendByAnswersTiming = {
+  name: RecommendByAnswersProgressStage;
+  durationMs: number;
+};
+
+export type RecommendByAnswersDebugInfo = {
+  timings: RecommendByAnswersTiming[];
+  counts: {
+    rawMatches: number;
+    budgetFiltered: number;
+    categoryFiltered: number;
+    deliveryFiltered: number;
+  };
+  personalization: {
+    attempted: boolean;
+    profileBuilt: boolean;
+    applied: boolean;
+    useLlmPersonalization: boolean;
+  };
+};
+
 export type RecommendByAnswersInput = {
   budget?: string;
   category?: string;
@@ -23,6 +55,7 @@ export type RecommendByAnswersInput = {
   allowCategoryFallback?: boolean;
   userId?: string;
   useLlmPersonalization?: boolean;
+  onProgress?: (stage: RecommendByAnswersProgressStage) => void | Promise<void>;
 };
 
 export type BudgetRange = {
@@ -44,6 +77,7 @@ export type RecommendByAnswersResult = {
   matches: Array<
     SearchMatch & { personalBoost?: number; personalReasons?: string[] }
   >;
+  debugInfo: RecommendByAnswersDebugInfo;
 };
 
 export function parseTopK(value: unknown, fallback = DEFAULT_TOP_K) {
@@ -193,43 +227,94 @@ function matchesDelivery(raw: RawProduct | null, delivery: string) {
   return false;
 }
 
+async function notifyProgress(
+  input: RecommendByAnswersInput,
+  stage: RecommendByAnswersProgressStage
+) {
+  await input.onProgress?.(stage);
+}
+
+async function measureStep<T>(
+  timings: RecommendByAnswersTiming[],
+  name: RecommendByAnswersProgressStage,
+  runner: () => Promise<T> | T
+): Promise<T> {
+  const startedAt = Date.now();
+  const result = await runner();
+  timings.push({
+    name,
+    durationMs: Date.now() - startedAt,
+  });
+  return result;
+}
+
 export async function recommendByAnswers(
   input: RecommendByAnswersInput
 ): Promise<RecommendByAnswersResult> {
-  const queryText = input.queryText ?? buildQueryText(input);
+  const timings: RecommendByAnswersTiming[] = [];
+  let rawMatchCount = 0;
+  let budgetFilteredCount = 0;
+  let categoryFilteredCount = 0;
+  let deliveryFilteredCount = 0;
+  let personalizationAttempted = false;
+  let personalizationProfileBuilt = false;
+  let personalizationApplied = false;
+
+  await notifyProgress(input, "build_query_text");
+  const queryText = await measureStep(timings, "build_query_text", () =>
+    input.queryText ?? buildQueryText(input)
+  );
   const topK = input.topK ?? DEFAULT_TOP_K;
   const threshold = input.threshold ?? DEFAULT_THRESHOLD;
-  const embedding = await generateTextEmbedding(queryText);
-  const rawMatches = await searchTextEmbeddings({
-    embedding: embedding.vector,
-    topK,
-    threshold,
-  });
+  await notifyProgress(input, "generate_text_embedding");
+  const embedding = await measureStep(timings, "generate_text_embedding", () =>
+    generateTextEmbedding(queryText)
+  );
+  await notifyProgress(input, "search_text_embeddings");
+  const rawMatches = await measureStep(timings, "search_text_embeddings", () =>
+    searchTextEmbeddings({
+      embedding: embedding.vector,
+      topK,
+      threshold,
+    })
+  );
+  rawMatchCount = rawMatches.length;
   const budgetRange = parseBudgetRange(input.budget);
-  const budgetFiltered = budgetRange
-    ? rawMatches.filter((match) => {
-        const amount = coerceAmount(match.metadata ?? null);
-        return amount !== null && withinBudget(amount, budgetRange);
-      })
-    : rawMatches;
+  await notifyProgress(input, "filter_budget");
+  const budgetFiltered = await measureStep(timings, "filter_budget", () =>
+    budgetRange
+      ? rawMatches.filter((match) => {
+          const amount = coerceAmount(match.metadata ?? null);
+          return amount !== null && withinBudget(amount, budgetRange);
+        })
+      : rawMatches
+  );
+  budgetFilteredCount = budgetFiltered.length;
   const hasCategoryCondition = Boolean(input.category && input.category.trim().length > 0);
   const allowCategoryFallback = input.allowCategoryFallback !== false;
-  const categoryFiltered = hasCategoryCondition
-    ? budgetFiltered.filter((match) =>
-        matchesCategory(coerceRaw(match.metadata ?? null), input.category ?? "")
-      )
-    : budgetFiltered;
+  await notifyProgress(input, "filter_category");
+  const categoryFiltered = await measureStep(timings, "filter_category", () =>
+    hasCategoryCondition
+      ? budgetFiltered.filter((match) =>
+          matchesCategory(coerceRaw(match.metadata ?? null), input.category ?? "")
+        )
+      : budgetFiltered
+  );
+  categoryFilteredCount = categoryFiltered.length;
   const strictMatchCount = categoryFiltered.length;
   const fallbackApplied =
     hasCategoryCondition && strictMatchCount === 0 && allowCategoryFallback;
   const categoryFallbackBase = fallbackApplied ? budgetFiltered : categoryFiltered;
-  const deliveryFiltered =
+  await notifyProgress(input, "filter_delivery");
+  const deliveryFiltered = await measureStep(timings, "filter_delivery", () =>
     input.delivery && input.delivery.length > 0
       ? categoryFallbackBase.filter((match) => {
           const raw = coerceRaw(match.metadata ?? null);
           return input.delivery?.every((entry) => matchesDelivery(raw, entry));
         })
-      : categoryFallbackBase;
+      : categoryFallbackBase
+  );
+  deliveryFilteredCount = deliveryFiltered.length;
   const fallbackInfo: RecommendByAnswersResult["fallbackInfo"] = {
     enabled: allowCategoryFallback,
     applied: fallbackApplied,
@@ -239,23 +324,52 @@ export async function recommendByAnswers(
     relaxedMatchCount: fallbackApplied ? deliveryFiltered.length : strictMatchCount,
   };
   let matches: RecommendByAnswersResult["matches"] = deliveryFiltered;
-  if (input.userId) {
+  const userId = input.userId;
+  if (userId) {
+    personalizationAttempted = true;
     try {
-      const profile = await buildUserPreferenceProfile(input.userId, {
-        useLlmPersonalization: input.useLlmPersonalization === true,
-      });
+      await notifyProgress(input, "build_user_preference_profile");
+      const profile = await measureStep(
+        timings,
+        "build_user_preference_profile",
+        () =>
+          buildUserPreferenceProfile(userId, {
+            useLlmPersonalization: input.useLlmPersonalization === true,
+          })
+      );
       if (profile) {
-        matches = applyPersonalization(deliveryFiltered, profile);
+        personalizationProfileBuilt = true;
+        await notifyProgress(input, "apply_personalization");
+        matches = await measureStep(timings, "apply_personalization", () =>
+          applyPersonalization(deliveryFiltered, profile)
+        );
+        personalizationApplied = true;
       }
     } catch {
       matches = deliveryFiltered;
     }
   }
+  await notifyProgress(input, "complete");
 
   return {
     queryText,
     budgetRange,
     fallbackInfo,
     matches,
+    debugInfo: {
+      timings,
+      counts: {
+        rawMatches: rawMatchCount,
+        budgetFiltered: budgetFilteredCount,
+        categoryFiltered: categoryFilteredCount,
+        deliveryFiltered: deliveryFilteredCount,
+      },
+      personalization: {
+        attempted: personalizationAttempted,
+        profileBuilt: personalizationProfileBuilt,
+        applied: personalizationApplied,
+        useLlmPersonalization: input.useLlmPersonalization === true,
+      },
+    },
   };
 }
