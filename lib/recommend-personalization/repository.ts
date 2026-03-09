@@ -10,6 +10,13 @@ export type ClickEventInput = {
   metadata?: Record<string, unknown> | null;
 };
 
+export type RecommendSearchEventInput = {
+  userId?: string | null;
+  source?: string | null;
+  eventType: string;
+  metadata?: Record<string, unknown> | null;
+};
+
 export type ClickEvent = {
   userId: string;
   productId: string;
@@ -77,6 +84,35 @@ export async function insertClickEvent(input: ClickEventInput): Promise<{ id: st
       ${input.productId},
       ${input.cityCode ?? null},
       ${input.score ?? null},
+      ${metadata}
+    )
+  `;
+
+  return { id };
+}
+
+export async function insertRecommendSearchEvent(
+  input: RecommendSearchEventInput
+): Promise<{ id: string }> {
+  const db = getDb();
+  const id = randomUUID();
+  const source = input.source?.trim() ? input.source.trim() : "recommend-assistant";
+  const eventType = input.eventType.trim();
+  const metadata = normalizeMetadata(input.metadata);
+
+  await db`
+    insert into public.recommend_search_events (
+      id,
+      user_id,
+      source,
+      event_type,
+      metadata
+    )
+    values (
+      ${id}::uuid,
+      ${input.userId ?? null}::uuid,
+      ${source},
+      ${eventType},
       ${metadata}
     )
   `;

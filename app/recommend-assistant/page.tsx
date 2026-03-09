@@ -68,6 +68,22 @@ type BudgetRange = {
   max: number | null;
 };
 
+type RawCategoryEntry = {
+  category1_name?: string | null;
+  category2_name?: string | null;
+  category3_name?: string | null;
+};
+
+type RawProductForCategory = {
+  categories?: RawCategoryEntry[] | null;
+  category?: string | null;
+  category_name?: string | null;
+  genre?: string | null;
+  genre_name?: string | null;
+  product_type?: string | null;
+  item_type?: string | null;
+};
+
 type Match = {
   id: string;
   productId: string;
@@ -102,6 +118,7 @@ type ApiResponse = {
   queryText?: string;
   matches?: Match[];
   budgetRange?: BudgetRange | null;
+  fallbackInfo?: FallbackInfo;
   error?: string;
 };
 
@@ -146,6 +163,15 @@ type Message = {
   text: string;
 };
 
+type FallbackInfo = {
+  enabled: boolean;
+  applied: boolean;
+  reason: "category_no_match" | null;
+  relaxedConditions: string[];
+  strictMatchCount: number;
+  relaxedMatchCount: number;
+};
+
 type ClickPayload = {
   userId: string;
   productId: string;
@@ -158,6 +184,7 @@ type ClickPayload = {
 const DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT = 20;
 const MIN_SIMILAR_IMAGE_RESULT_LIMIT = 1;
 const MAX_SIMILAR_IMAGE_RESULT_LIMIT = 100;
+const AUTO_RELAX_STORAGE_KEY = "recommend_assistant_auto_relax";
 
 const FIELD_LABELS: Record<string, string> = {
   purpose: "用途",
@@ -233,9 +260,59 @@ function parseBudgetRange(budget: string | undefined): BudgetRange | null {
   return null;
 }
 
+function normalizeCategoryText(value: string) {
+  return value.trim().toLowerCase().replace(/[\s・/／、,]/g, "");
+}
+
+function coerceRawProductForCategory(
+  metadata: Record<string, unknown> | null
+): RawProductForCategory | null {
+  if (!metadata || typeof metadata !== "object") return null;
+  const raw = metadata.raw;
+  if (!raw || typeof raw !== "object") return null;
+  return raw as RawProductForCategory;
+}
+
+function collectCategoryCandidates(raw: RawProductForCategory): string[] {
+  const candidates: string[] = [];
+  if (Array.isArray(raw.categories)) {
+    raw.categories.forEach((entry) => {
+      if (entry.category1_name) candidates.push(entry.category1_name);
+      if (entry.category2_name) candidates.push(entry.category2_name);
+      if (entry.category3_name) candidates.push(entry.category3_name);
+    });
+  }
+  if (raw.category) candidates.push(raw.category);
+  if (raw.category_name) candidates.push(raw.category_name);
+  if (raw.genre) candidates.push(raw.genre);
+  if (raw.genre_name) candidates.push(raw.genre_name);
+  if (raw.product_type) candidates.push(raw.product_type);
+  if (raw.item_type) candidates.push(raw.item_type);
+  return candidates.filter((value) => value.trim().length > 0);
+}
+
+function matchesCategoryInMetadata(
+  metadata: Record<string, unknown> | null,
+  category: string
+): boolean {
+  const raw = coerceRawProductForCategory(metadata);
+  if (!raw) return false;
+  const normalizedTarget = normalizeCategoryText(category);
+  if (!normalizedTarget) return false;
+  const candidates = collectCategoryCandidates(raw);
+  return candidates.some((candidate) => {
+    const normalizedCandidate = normalizeCategoryText(candidate);
+    if (!normalizedCandidate) return false;
+    return (
+      normalizedCandidate.includes(normalizedTarget) ||
+      normalizedTarget.includes(normalizedCandidate)
+    );
+  });
+}
+
 function buildReasonLabels(slots: SlotState, match: Match): string[] {
   const labels: string[] = [];
-  if (slots.category) {
+  if (slots.category && matchesCategoryInMetadata(match.metadata, slots.category)) {
     labels.push("カテゴリ一致");
   }
   const budgetRange = parseBudgetRange(slots.budget);
@@ -313,6 +390,16 @@ function buildModalMatchFromSimilarResult(row: SimilarImageResult): Match {
   };
 }
 
+function excludeSourceProductFromSimilarResults(
+  results: SimilarImageResult[] | undefined,
+  sourceProductId: string
+): SimilarImageResult[] {
+  if (!results || results.length === 0) return [];
+  const trimmedSourceProductId = sourceProductId.trim();
+  if (!trimmedSourceProductId) return results;
+  return results.filter((row) => row.product_id !== trimmedSourceProductId);
+}
+
 function formatAgentSearchStrategy(
   strategy: AgentExtractionSummary["searchStrategy"]
 ): string {
@@ -365,6 +452,7 @@ function createInitialSession(): ConversationSession {
 }
 
 export default function RecommendAssistantPage() {
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const defaultInitialState = buildInitialState(DEFAULT_QUESTION_SET.steps);
   const [activeSteps, setActiveSteps] = useState<AssistantStepConfig[]>(
     DEFAULT_QUESTION_SET.steps
@@ -388,6 +476,8 @@ export default function RecommendAssistantPage() {
   const [displayMode, setDisplayMode] = useState<"debug" | "product">("product");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [allowCategoryFallback, setAllowCategoryFallback] = useState(true);
+  const [fallbackInfo, setFallbackInfo] = useState<FallbackInfo | null>(null);
   const [hasInteracted, setHasInteracted] = useState(false);
   const [recommendUserId, setRecommendUserId] = useState<string | null>(null);
   const [useLlmPersonalization, setUseLlmPersonalization] = useState(false);
@@ -401,6 +491,8 @@ export default function RecommendAssistantPage() {
   const [agentLoading, setAgentLoading] = useState(false);
   const [agentLoadingStageIndex, setAgentLoadingStageIndex] = useState(0);
   const [agentError, setAgentError] = useState<string | null>(null);
+  const [hasAgentRequested, setHasAgentRequested] = useState(false);
+  const [agentQueryText, setAgentQueryText] = useState<string | null>(null);
   const [similarImageSourceUrl, setSimilarImageSourceUrl] = useState<string | null>(null);
   const [similarImageSourceProductId, setSimilarImageSourceProductId] = useState<string | null>(
     null
@@ -431,6 +523,7 @@ export default function RecommendAssistantPage() {
     setQuickReplies(initialState.quickReplies);
     setDisplayMode("product");
     setError(null);
+    setFallbackInfo(null);
   }, []);
 
   const clearSimilarImageResults = useCallback(() => {
@@ -481,6 +574,30 @@ export default function RecommendAssistantPage() {
   }, []);
 
   useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(AUTO_RELAX_STORAGE_KEY);
+      if (saved === "false") {
+        setAllowCategoryFallback(false);
+      } else if (saved === "true") {
+        setAllowCategoryFallback(true);
+      }
+    } catch {
+      // localStorage読取失敗時はデフォルト値を使う
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        AUTO_RELAX_STORAGE_KEY,
+        allowCategoryFallback ? "true" : "false"
+      );
+    } catch {
+      // localStorage書込失敗時は無視
+    }
+  }, [allowCategoryFallback]);
+
+  useEffect(() => {
     if (similarImageSearchRequestId <= 0) return;
     const frameId = requestAnimationFrame(() => {
       similarImageResultAnchorRef.current?.scrollIntoView({
@@ -507,17 +624,26 @@ export default function RecommendAssistantPage() {
 
   async function submitMessage(
     rawText: string,
-    options?: { selectedStepKey?: ConversationStepKey | null }
+    options?: {
+      selectedStepKey?: ConversationStepKey | null;
+      allowCategoryFallbackOverride?: boolean;
+      appendUserMessage?: boolean;
+    }
   ) {
     if (isSubmitting) return;
 
+    const shouldAppendUserMessage = options?.appendUserMessage !== false;
     const userText = rawText.trim();
     if (!userText) return;
 
-    setInput("");
+    if (shouldAppendUserMessage) {
+      setInput("");
+    }
     setError(null);
     setHasInteracted(true);
-    setMessages((prev) => [...prev, { role: "user", text: userText }]);
+    if (shouldAppendUserMessage) {
+      setMessages((prev) => [...prev, { role: "user", text: userText }]);
+    }
     setIsSubmitting(true);
 
     try {
@@ -531,6 +657,8 @@ export default function RecommendAssistantPage() {
           threshold: threshold ? Number(threshold) : undefined,
           selectedStepKey: options?.selectedStepKey ?? undefined,
           selectedValue: options?.selectedStepKey ? userText : undefined,
+          allowCategoryFallback:
+            options?.allowCategoryFallbackOverride ?? allowCategoryFallback,
           userId: recommendUserId ?? undefined,
           useLlmPersonalization,
         }),
@@ -562,27 +690,34 @@ export default function RecommendAssistantPage() {
       if (data.action === "recommend") {
         setMatches(data.matches ?? []);
         setQueryText(data.queryText ?? null);
+        setFallbackInfo(data.fallbackInfo ?? null);
         setNextQuestionKey(null);
         setQuickReplies([]);
         setMissingKeys([]);
+        setHasAgentRequested(false);
         setAgentMatches([]);
         setAgentMessage(null);
         setAgentFinalUseLlm(null);
         setAgentExtractionSummary(null);
         setAgentError(null);
+        setAgentQueryText(null);
         clearSimilarImageResults();
       } else {
         setMatches([]);
         setQueryText(null);
+        setFallbackInfo(null);
+        setHasAgentRequested(false);
         setAgentMatches([]);
         setAgentMessage(null);
         setAgentFinalUseLlm(null);
         setAgentExtractionSummary(null);
         setAgentError(null);
+        setAgentQueryText(null);
         clearSimilarImageResults();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
+      setFallbackInfo(null);
       setMessages((prev) => [
         ...prev,
         { role: "assistant", text: "エラーが発生しました。条件をもう一度教えてください。" },
@@ -634,7 +769,9 @@ export default function RecommendAssistantPage() {
         throw new Error(data.error ?? `Request failed (status ${res.status})`);
       }
 
-      setSimilarImageResults(data.results ?? []);
+      setSimilarImageResults(
+        excludeSourceProductFromSimilarResults(data.results, sourceProductId)
+      );
       setSimilarImageEmbeddingMs(data.embeddingDurationMs ?? null);
       setSimilarImageModel(data.model ?? null);
     } catch (err) {
@@ -647,12 +784,14 @@ export default function RecommendAssistantPage() {
   async function requestAgentRecommendations() {
     if (agentLoading || !recommendUserId) return;
 
+    setHasAgentRequested(true);
     setAgentLoading(true);
     setAgentError(null);
     setAgentMessage(null);
     setAgentMatches([]);
     setAgentFinalUseLlm(null);
     setAgentExtractionSummary(null);
+    setAgentQueryText(null);
 
     try {
       const res = await fetch("/api/recommend/agent-personalized", {
@@ -684,6 +823,7 @@ export default function RecommendAssistantPage() {
         typeof data.finalUseLlm === "boolean" ? data.finalUseLlm : null
       );
       setAgentExtractionSummary(data.agentExtractionSummary ?? null);
+      setAgentQueryText(data.queryText ?? null);
     } catch (err) {
       setAgentError(err instanceof Error ? err.message : "Unknown error");
     } finally {
@@ -696,17 +836,39 @@ export default function RecommendAssistantPage() {
     await submitMessage(input);
   }
 
+  async function retryWithStrictCategory() {
+    await submitMessage("厳密条件で再検索", {
+      allowCategoryFallbackOverride: false,
+      appendUserMessage: false,
+    });
+  }
+
+  function promptCategoryChange() {
+    setNextQuestionKey("category");
+    setQuickReplies(getQuickRepliesForKey(activeSteps, "category"));
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: "assistant",
+        text: "カテゴリを変更して再検索できます。カテゴリを入力または選択してください。",
+      },
+    ]);
+    inputRef.current?.focus();
+  }
+
   function resetConversation() {
     if (isSubmitting) return;
     setHasInteracted(false);
     resetToSteps(activeSteps);
     setModalMatch(null);
     setModalInterestTracked(false);
+    setHasAgentRequested(false);
     setAgentMatches([]);
     setAgentMessage(null);
     setAgentFinalUseLlm(null);
     setAgentExtractionSummary(null);
     setAgentError(null);
+    setAgentQueryText(null);
     clearSimilarImageResults();
   }
 
@@ -743,6 +905,14 @@ export default function RecommendAssistantPage() {
   const modalImage = modalInfo?.image ?? null;
   const modalDescription = modalMatch ? buildModalDescription(modalMatch) : "";
   const agentLoadingStage = AGENT_LOADING_STAGES[agentLoadingStageIndex] ?? "";
+  const hasConversationMatches = matches.length > 0;
+  const canRequestAgent = hasConversationMatches && !!recommendUserId;
+  const showAgentResultSection =
+    agentLoading ||
+    agentError ||
+    agentMessage ||
+    agentExtractionSummary ||
+    agentMatches.length > 0;
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-10 sm:px-6 lg:px-8">
@@ -766,6 +936,7 @@ export default function RecommendAssistantPage() {
           <li>カテゴリ候補: 既存 `metadata` から抽出した頻出カテゴリを優先表示</li>
           <li>検索件数（`topK`）と類似度しきい値（`threshold`）は画面で調整可能</li>
           <li>初期値: `topK=10` / `threshold=0.35`</li>
+          <li>カテゴリ0件時の自動条件緩和はトグルでON/OFF可能（初期ON、localStorage保存）</li>
           <li>予算フィルタ: 予算レンジに一致する金額のみを表示</li>
           <li>カテゴリフィルタ: 商品カテゴリに入力カテゴリが含まれるものを優先</li>
           <li>配送フィルタ: 指定された配送条件をすべて満たす商品のみ表示</li>
@@ -853,33 +1024,42 @@ export default function RecommendAssistantPage() {
                 placeholder="0.35"
               />
             </div>
-          <div className="space-y-1">
-            <div className="text-xs text-muted-foreground">画像類似件数 (`limit`)</div>
-            <Input
-              type="number"
-              min={MIN_SIMILAR_IMAGE_RESULT_LIMIT}
-              max={MAX_SIMILAR_IMAGE_RESULT_LIMIT}
-              step={1}
-              value={similarImageLimit}
-              onChange={(event) => setSimilarImageLimit(event.target.value)}
-              placeholder={String(DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT)}
-            />
+            <div className="space-y-1">
+              <div className="text-xs text-muted-foreground">画像類似件数 (`limit`)</div>
+              <Input
+                type="number"
+                min={MIN_SIMILAR_IMAGE_RESULT_LIMIT}
+                max={MAX_SIMILAR_IMAGE_RESULT_LIMIT}
+                step={1}
+                value={similarImageLimit}
+                onChange={(event) => setSimilarImageLimit(event.target.value)}
+                placeholder={String(DEFAULT_SIMILAR_IMAGE_RESULT_LIMIT)}
+              />
+            </div>
           </div>
-        </div>
-        <label className="flex items-center gap-2 text-xs text-muted-foreground">
-          <input
-            type="checkbox"
-            className="h-4 w-4 accent-primary"
-            checked={useLlmPersonalization}
-            onChange={(event) => setUseLlmPersonalization(event.target.checked)}
-          />
-          LLM個人化を使う（実験）
-        </label>
-        <div className="text-xs text-muted-foreground">
-          有効条件: `RECOMMEND_PERSONALIZATION_LLM_ENABLED=true` かつ
-          画面でONのときのみ。失敗時は自動でルールベースへフォールバックします。
-        </div>
-        <ul className="mt-1 space-y-1 text-xs text-muted-foreground">
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              className="h-4 w-4 accent-primary"
+              checked={allowCategoryFallback}
+              onChange={(event) => setAllowCategoryFallback(event.target.checked)}
+            />
+            自動で条件緩和する
+          </label>
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              className="h-4 w-4 accent-primary"
+              checked={useLlmPersonalization}
+              onChange={(event) => setUseLlmPersonalization(event.target.checked)}
+            />
+            LLM個人化を使う（実験）
+          </label>
+          <div className="text-xs text-muted-foreground">
+            有効条件: `RECOMMEND_PERSONALIZATION_LLM_ENABLED=true` かつ
+            画面でONのときのみ。失敗時は自動でルールベースへフォールバックします。
+          </div>
+          <ul className="mt-1 space-y-1 text-xs text-muted-foreground">
           <li>
             使うと: クリック履歴に近い商品が上位に来やすくなり、順位が変わります
           </li>
@@ -897,6 +1077,7 @@ export default function RecommendAssistantPage() {
 
         <form className="flex flex-col gap-2 sm:flex-row" onSubmit={handleSubmit}>
             <Input
+              ref={inputRef}
               value={input}
               onChange={(event) => setInput(event.target.value)}
               placeholder="例: 1万円前後で魚介、贈り物用"
@@ -940,12 +1121,17 @@ export default function RecommendAssistantPage() {
         </Card>
       )}
 
-      {matches.length > 0 ? (
-        <Card className="border bg-card/60 p-4 shadow-sm sm:p-6">
-          <div className="mb-4 flex items-center justify-between">
-            <div className="text-sm font-medium text-muted-foreground">
-              推薦結果: {matches.length}件
+      <Card className="border bg-card/60 p-4 shadow-sm sm:p-6">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div className="space-y-1">
+            <div className="text-sm font-medium text-foreground">会話推薦（通常候補）</div>
+            <div className="text-xs text-muted-foreground">
+              {hasConversationMatches
+                ? `推薦結果: ${matches.length}件`
+                : "まだおすすめが表示されていません。条件を入力してください。"}
             </div>
+          </div>
+          {hasConversationMatches && (
             <div className="flex flex-wrap items-center justify-end gap-2">
               <Button
                 type="button"
@@ -963,28 +1149,46 @@ export default function RecommendAssistantPage() {
               >
                 商品カード表示
               </Button>
+            </div>
+          )}
+        </div>
+
+        {fallbackInfo?.applied && (
+          <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+            <div>
+              カテゴリに一致する商品がなかったため、カテゴリ条件を緩和して表示しています。
+            </div>
+            <div className="mt-2 text-xs">
+              緩和条件: カテゴリ / 厳密一致件数: {fallbackInfo.strictMatchCount}件 / 緩和後件数:{" "}
+              {fallbackInfo.relaxedMatchCount}件
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={isSubmitting}
+                onClick={() => {
+                  void retryWithStrictCategory();
+                }}
+              >
+                厳密条件で再検索
+              </Button>
               <Button
                 type="button"
                 size="sm"
                 variant="secondary"
-                disabled={agentLoading || !recommendUserId}
-                onClick={() => {
-                  void requestAgentRecommendations();
-                }}
+                disabled={isSubmitting}
+                onClick={promptCategoryChange}
               >
-                {agentLoading ? (
-                  <span className="inline-flex items-center gap-2">
-                    <Loader2Icon className="h-4 w-4 animate-spin" />
-                    AIエージェントが検討中...
-                  </span>
-                ) : (
-                  "AIエージェントにおすすめを聞く"
-                )}
+                カテゴリを変更
               </Button>
             </div>
           </div>
+        )}
 
-          {displayMode === "debug" ? (
+        {hasConversationMatches ? (
+          displayMode === "debug" ? (
             <div className="space-y-3">
               {matches.map((match) => (
                 <div key={match.id} className="rounded border bg-background/70 p-3 text-sm">
@@ -1049,7 +1253,9 @@ export default function RecommendAssistantPage() {
                           onError={(event) => {
                             const target = event.currentTarget;
                             target.style.display = "none";
-                            const fallback = target.parentElement?.querySelector(".image-fallback");
+                            const fallback = target.parentElement?.querySelector(
+                              ".image-fallback"
+                            );
                             if (fallback) {
                               (fallback as HTMLElement).style.display = "flex";
                             }
@@ -1085,7 +1291,9 @@ export default function RecommendAssistantPage() {
                         }}
                       >
                         {displayName}
-                        <span className="ml-1 inline-block text-xs text-muted-foreground">↗</span>
+                        <span className="ml-1 inline-block text-xs text-muted-foreground">
+                          ↗
+                        </span>
                       </a>
 
                       <div className="mt-2 text-lg font-bold text-primary">
@@ -1143,220 +1351,270 @@ export default function RecommendAssistantPage() {
                 );
               })}
             </div>
-          )}
-        </Card>
-      ) : (
-        <div className="rounded-md bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
-          まだおすすめが表示されていません。条件を入力してください。
+          )
+        ) : (
+          <div className="rounded-md bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+            まだおすすめが表示されていません。条件を入力してください。
+          </div>
+        )}
+      </Card>
+
+      <Card className="border bg-card/60 p-4 shadow-sm sm:p-6">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-1">
+            <div className="text-sm font-medium text-foreground">
+              AIエージェント提案（理由付き）
+            </div>
+            <div className="text-xs text-muted-foreground">
+              会話推薦とは別に、履歴シグナルと現在条件で候補を再提案します。
+            </div>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={agentLoading || !canRequestAgent}
+            onClick={() => {
+              void requestAgentRecommendations();
+            }}
+          >
+            {agentLoading ? (
+              <span className="inline-flex items-center gap-2">
+                <Loader2Icon className="h-4 w-4 animate-spin" />
+                AIエージェントが検討中...
+              </span>
+            ) : hasAgentRequested ? (
+              "AIエージェント提案を再実行"
+            ) : (
+              "AIエージェントにおすすめを聞く"
+            )}
+          </Button>
         </div>
-      )}
 
-      {(
-        agentLoading ||
-        agentError ||
-        agentMessage ||
-        agentExtractionSummary ||
-        agentMatches.length > 0
-      ) && (
-        <Card className="border bg-card/60 p-4 shadow-sm sm:p-6">
-          <div className="mb-3 text-sm font-medium text-foreground">エージェントのおすすめ</div>
-          {agentLoading && (
-            <div className="rounded-md border bg-muted/40 px-3 py-3">
-              <div className="flex items-center gap-2 text-sm text-foreground">
-                <Loader2Icon className="h-4 w-4 animate-spin text-primary" />
-                AIエージェントが考えています...
-              </div>
-              <div className="mt-1 text-xs text-muted-foreground">
-                {agentLoadingStage}
-              </div>
-              <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                {[0, 1, 2].map((index) => (
-                  <div
-                    key={`agent-loading-skeleton-${index}`}
-                    className="rounded border bg-background/80 p-2"
-                  >
-                    <div className="aspect-[4/3] w-full animate-pulse rounded bg-muted" />
-                    <div className="mt-2 h-3 w-4/5 animate-pulse rounded bg-muted" />
-                    <div className="mt-2 h-3 w-3/5 animate-pulse rounded bg-muted" />
-                  </div>
-                ))}
-              </div>
+        {!canRequestAgent && (
+          <div className="rounded-md bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+            先に会話推薦で通常候補を表示すると、AIエージェント提案を実行できます。
+          </div>
+        )}
+
+        {canRequestAgent && !hasAgentRequested && !showAgentResultSection && (
+          <div className="rounded-md bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+            ボタンを押すと、クリック履歴と現在条件をもとに理由付き提案を表示します。
+          </div>
+        )}
+
+        {agentLoading && (
+          <div className="rounded-md border bg-muted/40 px-3 py-3">
+            <div className="flex items-center gap-2 text-sm text-foreground">
+              <Loader2Icon className="h-4 w-4 animate-spin text-primary" />
+              AIエージェントが考えています...
             </div>
-          )}
-          {!agentLoading && agentError && (
-            <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {agentError}
+            <div className="mt-1 text-xs text-muted-foreground">
+              現在の段階 ({agentLoadingStageIndex + 1}/{AGENT_LOADING_STAGES.length}):{" "}
+              {agentLoadingStage}
             </div>
-          )}
-          {!agentLoading && !agentError && agentMessage && (
-            <div className="rounded-md bg-muted/60 px-3 py-2 text-sm text-foreground">
-              {agentMessage}
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+              {[0, 1, 2].map((index) => (
+                <div
+                  key={`agent-loading-skeleton-${index}`}
+                  className="rounded border bg-background/80 p-2"
+                >
+                  <div className="aspect-[4/3] w-full animate-pulse rounded bg-muted" />
+                  <div className="mt-2 h-3 w-4/5 animate-pulse rounded bg-muted" />
+                  <div className="mt-2 h-3 w-3/5 animate-pulse rounded bg-muted" />
+                </div>
+              ))}
             </div>
-          )}
-          {!agentLoading && !agentError && agentExtractionSummary && (
-            <div className="mt-3 rounded-md border bg-background/60 p-3 text-xs">
-              <div className="font-medium text-foreground">
-                このおすすめの抽出内容
-              </div>
-              <div className="mt-1 text-muted-foreground">
-                LLM個人化経路:{" "}
-                {agentFinalUseLlm === null
-                  ? "-"
-                  : agentFinalUseLlm
-                    ? "有効"
-                    : "無効"}
-                {" / "}
-                個人化で並び替えが入った候補:{" "}
-                {agentExtractionSummary.personalizedMatchCount ?? 0}件
-              </div>
-              <div className="mt-1 text-muted-foreground">
-                抽出戦略:{" "}
-                {formatAgentSearchStrategy(agentExtractionSummary.searchStrategy)}
-              </div>
-              {agentExtractionSummary.currentConditions &&
-                agentExtractionSummary.currentConditions.length > 0 && (
-                  <div className="mt-2">
-                    <div className="font-medium text-foreground">現在条件</div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {agentExtractionSummary.currentConditions.map((line) => (
-                        <span key={line} className="rounded bg-muted px-2 py-0.5">
-                          {line}
-                        </span>
-                      ))}
-                    </div>
+          </div>
+        )}
+        {!agentLoading && agentError && (
+          <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {agentError}
+          </div>
+        )}
+        {!agentLoading && !agentError && agentMessage && (
+          <div className="rounded-md bg-muted/60 px-3 py-2 text-sm text-foreground">
+            {agentMessage}
+          </div>
+        )}
+        {!agentLoading && !agentError && agentExtractionSummary && (
+          <div className="mt-3 rounded-md border bg-background/60 p-3 text-xs">
+            <div className="font-medium text-foreground">このおすすめの抽出内容</div>
+            <div className="mt-1 text-muted-foreground">
+              LLM個人化経路:{" "}
+              {agentFinalUseLlm === null
+                ? "-"
+                : agentFinalUseLlm
+                  ? "有効"
+                  : "無効"}
+              {" / "}
+              個人化で並び替えが入った候補:{" "}
+              {agentExtractionSummary.personalizedMatchCount ?? 0}件
+            </div>
+            <div className="mt-1 text-muted-foreground">
+              抽出戦略: {formatAgentSearchStrategy(agentExtractionSummary.searchStrategy)}
+            </div>
+            {agentQueryText && (
+              <pre className="mt-2 whitespace-pre-wrap rounded bg-muted/70 p-2 text-xs text-foreground">
+                {agentQueryText}
+              </pre>
+            )}
+            {agentExtractionSummary.currentConditions &&
+              agentExtractionSummary.currentConditions.length > 0 && (
+                <div className="mt-2">
+                  <div className="font-medium text-foreground">現在条件</div>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {agentExtractionSummary.currentConditions.map((line) => (
+                      <span key={line} className="rounded bg-muted px-2 py-0.5">
+                        {line}
+                      </span>
+                    ))}
                   </div>
-                )}
-              {agentExtractionSummary.personalizationSignals &&
-                agentExtractionSummary.personalizationSignals.length > 0 && (
-                  <div className="mt-2">
-                    <div className="font-medium text-foreground">
-                      クリック履歴シグナル
-                    </div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {agentExtractionSummary.personalizationSignals.map((line) => (
-                        <span key={line} className="rounded bg-muted px-2 py-0.5">
-                          {line}
-                        </span>
-                      ))}
-                    </div>
+                </div>
+              )}
+            {agentExtractionSummary.personalizationSignals &&
+              agentExtractionSummary.personalizationSignals.length > 0 && (
+                <div className="mt-2">
+                  <div className="font-medium text-foreground">
+                    クリック履歴シグナル
                   </div>
-                )}
-              {agentExtractionSummary.rerankRules &&
-                agentExtractionSummary.rerankRules.length > 0 && (
-                  <div className="mt-2">
-                    <div className="font-medium text-foreground">
-                      再スコアリングルール
-                    </div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {agentExtractionSummary.rerankRules.map((line) => (
-                        <span key={line} className="rounded bg-muted px-2 py-0.5">
-                          {line}
-                        </span>
-                      ))}
-                    </div>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {agentExtractionSummary.personalizationSignals.map((line) => (
+                      <span key={line} className="rounded bg-muted px-2 py-0.5">
+                        {line}
+                      </span>
+                    ))}
                   </div>
-                )}
+                </div>
+              )}
+            {agentExtractionSummary.rerankRules &&
+              agentExtractionSummary.rerankRules.length > 0 && (
+                <div className="mt-2">
+                  <div className="font-medium text-foreground">
+                    再スコアリングルール
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {agentExtractionSummary.rerankRules.map((line) => (
+                      <span key={line} className="rounded bg-muted px-2 py-0.5">
+                        {line}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+          </div>
+        )}
+
+        {!agentLoading &&
+          !agentError &&
+          hasAgentRequested &&
+          !agentMessage &&
+          !agentExtractionSummary &&
+          agentMatches.length === 0 && (
+            <div className="mt-3 rounded-md bg-muted/60 px-3 py-2 text-sm text-muted-foreground">
+              条件に合うAIエージェント提案が見つかりませんでした。条件を変更して再実行してください。
             </div>
           )}
 
-          {!agentLoading && !agentError && agentMatches.length > 0 && (
-            <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {agentMatches.map((match) => {
-                const { name, image } = extractProductInfo(match.metadata);
-                const displayName = name || `商品ID: ${match.productId}`;
-                const productUrl = buildProductUrl(match.productId, match.cityCode);
-                const isSearchingThisImage =
-                  similarImageLoading &&
-                  !!image &&
-                  similarImageSourceUrl === image;
+        {!agentLoading && !agentError && agentMatches.length > 0 && (
+          <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {agentMatches.map((match) => {
+              const { name, image } = extractProductInfo(match.metadata);
+              const displayName = name || `商品ID: ${match.productId}`;
+              const productUrl = buildProductUrl(match.productId, match.cityCode);
+              const isSearchingThisImage =
+                similarImageLoading &&
+                !!image &&
+                similarImageSourceUrl === image;
 
-                return (
-                  <div
-                    key={`agent-${match.id}`}
-                    className="overflow-hidden rounded-lg border bg-background/70 shadow-sm transition-shadow hover:shadow-md"
-                  >
-                    <div className="relative aspect-[4/3] bg-muted">
-                      {image ? (
-                        <Image
-                          src={image}
-                          alt={displayName}
-                          fill
-                          className="object-cover"
-                          sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
-                        />
-                      ) : (
-                        <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
-                          画像なし
-                        </div>
-                      )}
-                    </div>
-                    <div className="p-3">
-                      <a
-                        href={productUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="line-clamp-2 text-sm font-medium hover:text-primary hover:underline"
-                        title={displayName}
-                        onClick={() => {
-                          if (!recommendUserId) return;
-                          trackClick({
-                            userId: recommendUserId,
-                            productId: match.productId,
-                            cityCode: match.cityCode,
-                            source: "recommend-assistant",
-                            score: match.score,
-                            metadata: buildClickMetadata(
-                              match,
-                              queryText,
-                              "agent_recommend_link"
-                            ),
-                          });
-                        }}
-                      >
-                        {displayName}
-                        <span className="ml-1 inline-block text-xs text-muted-foreground">↗</span>
-                      </a>
-                      <div className="mt-2 text-xs text-primary">{match.agentReason}</div>
-                      <div className="mt-2 text-lg font-bold text-primary">
-                        {match.amount ? `${match.amount.toLocaleString()}円` : "金額未設定"}
+              return (
+                <div
+                  key={`agent-${match.id}`}
+                  className="overflow-hidden rounded-lg border bg-background/70 shadow-sm transition-shadow hover:shadow-md"
+                >
+                  <div className="relative aspect-[4/3] bg-muted">
+                    {image ? (
+                      <Image
+                        src={image}
+                        alt={displayName}
+                        fill
+                        className="object-cover"
+                        sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+                      />
+                    ) : (
+                      <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
+                        画像なし
                       </div>
-                      <div className="mt-2 text-xs text-muted-foreground">
-                        スコア: {match.score.toFixed(4)}
-                      </div>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="secondary"
-                        className="mt-3 w-full"
-                        onClick={() => openProductDetailModal(match)}
-                      >
-                        画像と説明をみる
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="mt-2 w-full"
-                        disabled={!image || similarImageLoading}
-                        onClick={() => {
-                          if (!image) return;
-                          void searchSimilarProductsByImage(image, match.productId);
-                        }}
-                      >
-                        {!image
-                          ? "画像がないため検索不可"
-                          : isSearchingThisImage
-                            ? "類似画像を検索中..."
-                            : "この画像に似た商品を検索"}
-                      </Button>
-                    </div>
+                    )}
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </Card>
-      )}
+                  <div className="p-3">
+                    <a
+                      href={productUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="line-clamp-2 text-sm font-medium hover:text-primary hover:underline"
+                      title={displayName}
+                      onClick={() => {
+                        if (!recommendUserId) return;
+                        trackClick({
+                          userId: recommendUserId,
+                          productId: match.productId,
+                          cityCode: match.cityCode,
+                          source: "recommend-assistant",
+                          score: match.score,
+                          metadata: buildClickMetadata(
+                            match,
+                            agentQueryText ?? queryText,
+                            "agent_recommend_link"
+                          ),
+                        });
+                      }}
+                    >
+                      {displayName}
+                      <span className="ml-1 inline-block text-xs text-muted-foreground">
+                        ↗
+                      </span>
+                    </a>
+                    <div className="mt-2 text-xs text-primary">{match.agentReason}</div>
+                    <div className="mt-2 text-lg font-bold text-primary">
+                      {match.amount ? `${match.amount.toLocaleString()}円` : "金額未設定"}
+                    </div>
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      スコア: {match.score.toFixed(4)}
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      className="mt-3 w-full"
+                      onClick={() => openProductDetailModal(match)}
+                    >
+                      画像と説明をみる
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="mt-2 w-full"
+                      disabled={!image || similarImageLoading}
+                      onClick={() => {
+                        if (!image) return;
+                        void searchSimilarProductsByImage(image, match.productId);
+                      }}
+                    >
+                      {!image
+                        ? "画像がないため検索不可"
+                        : isSearchingThisImage
+                          ? "類似画像を検索中..."
+                          : "この画像に似た商品を検索"}
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
 
       <Dialog open={!!modalMatch} onOpenChange={handleModalOpenChange}>
         <DialogContent

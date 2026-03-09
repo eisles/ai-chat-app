@@ -6,6 +6,7 @@ const searchTextEmbeddings = vi.fn();
 const getRecommendCategoryQuickReplies = vi.fn();
 const getPublishedQuestionSet = vi.fn();
 const recommendByAnswers = vi.fn();
+const insertRecommendSearchEvent = vi.fn();
 
 vi.mock("@/lib/llm-providers", () => ({
   createCompletion,
@@ -44,11 +45,18 @@ vi.mock("@/lib/recommend-assistant-config/repository", () => ({
   getPublishedQuestionSet,
 }));
 
+vi.mock("@/lib/recommend-personalization/repository", () => ({
+  getRecentClicksByUser: vi.fn(),
+  getProductSignals: vi.fn(),
+  insertRecommendSearchEvent,
+}));
+
 const { POST } = await import("@/app/api/recommend/conversation/route");
 
 describe("POST /api/recommend/conversation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    insertRecommendSearchEvent.mockResolvedValue({ id: "event-1" });
     getRecommendCategoryQuickReplies.mockResolvedValue([
       "肉",
       "魚介",
@@ -185,6 +193,191 @@ describe("POST /api/recommend/conversation", () => {
     expect(json.action).toBe("recommend");
     expect(json.matches).toHaveLength(1);
     expect(json.queryText).toContain("カテゴリ: 旅行・体験");
+  });
+
+  it("カテゴリ一致が0件でもカテゴリ条件を緩めて候補を返す", async () => {
+    createCompletion.mockResolvedValue({
+      content:
+        "{\"budget\":\"20,001〜30,000円\",\"category\":\"スイーツ\",\"purpose\":\"自宅用\",\"delivery\":[\"冷凍\"],\"allergen\":\"なし\"}",
+    });
+    generateTextEmbedding.mockResolvedValue({
+      vector: [0.2, 0.3],
+      model: "text-embedding-test",
+      dim: 2,
+      normalized: null,
+      durationMs: 12,
+      byteSize: 8,
+    });
+    searchTextEmbeddings.mockResolvedValue([
+      {
+        id: "id-fallback-1",
+        productId: "p-fallback-1",
+        cityCode: null,
+        text: "カテゴリ不一致でも候補に残る",
+        metadata: {
+          raw: {
+            amount: 25000,
+            shipping_frozen_flag: 1,
+            categories: [
+              {
+                category1_name: "肉",
+                category2_name: null,
+                category3_name: null,
+              },
+            ],
+          },
+        },
+        score: 0.73,
+        amount: 25000,
+      },
+    ]);
+
+    const req = new Request("http://localhost/api/recommend/conversation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "2万円台でスイーツがほしい" }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(json.action).toBe("recommend");
+    expect(json.matches).toHaveLength(1);
+    expect(json.matches[0].productId).toBe("p-fallback-1");
+    expect(json.fallbackInfo).toMatchObject({
+      enabled: true,
+      applied: true,
+      reason: "category_no_match",
+      strictMatchCount: 0,
+      relaxedMatchCount: 1,
+    });
+  });
+
+  it("allowCategoryFallback=false の場合はカテゴリ0件時に0件を維持する", async () => {
+    createCompletion.mockResolvedValue({
+      content:
+        "{\"budget\":\"20,001〜30,000円\",\"category\":\"スイーツ\",\"purpose\":\"自宅用\",\"delivery\":[\"冷凍\"],\"allergen\":\"なし\"}",
+    });
+    generateTextEmbedding.mockResolvedValue({
+      vector: [0.2, 0.3],
+      model: "text-embedding-test",
+      dim: 2,
+      normalized: null,
+      durationMs: 12,
+      byteSize: 8,
+    });
+    searchTextEmbeddings.mockResolvedValue([
+      {
+        id: "id-fallback-off-1",
+        productId: "p-fallback-off-1",
+        cityCode: null,
+        text: "カテゴリ不一致",
+        metadata: {
+          raw: {
+            amount: 25000,
+            shipping_frozen_flag: 1,
+            categories: [
+              {
+                category1_name: "肉",
+                category2_name: null,
+                category3_name: null,
+              },
+            ],
+          },
+        },
+        score: 0.73,
+        amount: 25000,
+      },
+    ]);
+
+    const req = new Request("http://localhost/api/recommend/conversation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "2万円台でスイーツがほしい",
+        allowCategoryFallback: false,
+      }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(json.action).toBe("recommend");
+    expect(json.matches).toHaveLength(0);
+    expect(json.fallbackInfo).toMatchObject({
+      enabled: false,
+      applied: false,
+      strictMatchCount: 0,
+      relaxedMatchCount: 0,
+    });
+  });
+
+  it("fallback適用時は recommend_fallback_applied を記録する", async () => {
+    createCompletion.mockResolvedValue({
+      content:
+        "{\"budget\":\"20,001〜30,000円\",\"category\":\"スイーツ\",\"purpose\":\"自宅用\",\"delivery\":[\"冷凍\"],\"allergen\":\"なし\"}",
+    });
+    generateTextEmbedding.mockResolvedValue({
+      vector: [0.2, 0.3],
+      model: "text-embedding-test",
+      dim: 2,
+      normalized: null,
+      durationMs: 12,
+      byteSize: 8,
+    });
+    searchTextEmbeddings.mockResolvedValue([
+      {
+        id: "id-fallback-event-1",
+        productId: "p-fallback-event-1",
+        cityCode: null,
+        text: "カテゴリ不一致でも候補に残る",
+        metadata: {
+          raw: {
+            amount: 25000,
+            shipping_frozen_flag: 1,
+            categories: [
+              {
+                category1_name: "肉",
+                category2_name: null,
+                category3_name: null,
+              },
+            ],
+          },
+        },
+        score: 0.73,
+        amount: 25000,
+      },
+    ]);
+
+    const req = new Request("http://localhost/api/recommend/conversation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "2万円台でスイーツがほしい" }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(json.fallbackInfo?.applied).toBe(true);
+    expect(insertRecommendSearchEvent).toHaveBeenCalledTimes(1);
+    expect(insertRecommendSearchEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "recommend-assistant",
+        eventType: "recommend_fallback_applied",
+        metadata: expect.objectContaining({
+          reason: "category_no_match",
+          strictMatchCount: 0,
+          relaxedMatchCount: 1,
+          allowCategoryFallback: true,
+        }),
+      })
+    );
   });
 
   it("配送をスキップ入力した場合は追加条件の質問に進む", async () => {

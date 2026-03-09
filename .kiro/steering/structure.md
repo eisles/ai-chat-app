@@ -26,6 +26,16 @@ Next.js App Router を中心に、ページ/機能単位でディレクトリを
 **Purpose**: DB 接続やユーティリティなどの共有ロジック  
 **Example**: `/lib/neon.ts`, `/lib/image-text-search.ts`
 
+### Domain Modules
+**Location**: `/lib/recommend*`, `/lib/*-config`, `/lib/*-conversation`  
+**Purpose**: API ルートから委譲される業務ロジックを機能単位で分離する  
+**Example**: `/lib/recommend/by-answers-engine.ts`, `/lib/recommend-agent/service.ts`
+
+### Database Migrations
+**Location**: `/migrations/`  
+**Purpose**: Postgres スキーマ変更を SQL ファイルで加算管理する  
+**Example**: `/migrations/20260220_recommend_personalization_events.sql`
+
 ### Tests
 **Location**: `/tests/`  
 **Purpose**: API ルートの統合テスト  
@@ -50,7 +60,9 @@ import { localHelper } from "./local-helper"
 ## Code Organization Principles
 
 - API ルートは UI から直接呼び出す同期処理を基本とする
+- API ルートは入力検証・フラグ判定・エラーハンドリングに寄せ、業務ロジックは `lib/` に委譲する
 - 共通処理は `lib/` に集約し、UI からは薄い呼び出しにする
+- 読み取り中心の管理/検証ページでは Server Component から DB を直接参照する構成も許容する
 
 ---
 _Document patterns, not file trees. New files following patterns shouldn't require updates_

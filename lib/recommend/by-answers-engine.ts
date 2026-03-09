@@ -20,6 +20,7 @@ export type RecommendByAnswersInput = {
   topK?: number;
   threshold?: number;
   queryText?: string;
+  allowCategoryFallback?: boolean;
   userId?: string;
   useLlmPersonalization?: boolean;
 };
@@ -32,6 +33,14 @@ export type BudgetRange = {
 export type RecommendByAnswersResult = {
   queryText: string;
   budgetRange: BudgetRange | null;
+  fallbackInfo: {
+    enabled: boolean;
+    applied: boolean;
+    reason: "category_no_match" | null;
+    relaxedConditions: string[];
+    strictMatchCount: number;
+    relaxedMatchCount: number;
+  };
   matches: Array<
     SearchMatch & { personalBoost?: number; personalReasons?: string[] }
   >;
@@ -203,19 +212,32 @@ export async function recommendByAnswers(
         return amount !== null && withinBudget(amount, budgetRange);
       })
     : rawMatches;
-  const categoryFiltered =
-    input.category && input.category.trim().length > 0
-      ? budgetFiltered.filter((match) =>
-          matchesCategory(coerceRaw(match.metadata ?? null), input.category ?? "")
-        )
-      : budgetFiltered;
+  const hasCategoryCondition = Boolean(input.category && input.category.trim().length > 0);
+  const allowCategoryFallback = input.allowCategoryFallback !== false;
+  const categoryFiltered = hasCategoryCondition
+    ? budgetFiltered.filter((match) =>
+        matchesCategory(coerceRaw(match.metadata ?? null), input.category ?? "")
+      )
+    : budgetFiltered;
+  const strictMatchCount = categoryFiltered.length;
+  const fallbackApplied =
+    hasCategoryCondition && strictMatchCount === 0 && allowCategoryFallback;
+  const categoryFallbackBase = fallbackApplied ? budgetFiltered : categoryFiltered;
   const deliveryFiltered =
     input.delivery && input.delivery.length > 0
-      ? categoryFiltered.filter((match) => {
+      ? categoryFallbackBase.filter((match) => {
           const raw = coerceRaw(match.metadata ?? null);
           return input.delivery?.every((entry) => matchesDelivery(raw, entry));
         })
-      : categoryFiltered;
+      : categoryFallbackBase;
+  const fallbackInfo: RecommendByAnswersResult["fallbackInfo"] = {
+    enabled: allowCategoryFallback,
+    applied: fallbackApplied,
+    reason: fallbackApplied ? "category_no_match" : null,
+    relaxedConditions: fallbackApplied ? ["category"] : [],
+    strictMatchCount,
+    relaxedMatchCount: fallbackApplied ? deliveryFiltered.length : strictMatchCount,
+  };
   let matches: RecommendByAnswersResult["matches"] = deliveryFiltered;
   if (input.userId) {
     try {
@@ -233,6 +255,7 @@ export async function recommendByAnswers(
   return {
     queryText,
     budgetRange,
+    fallbackInfo,
     matches,
   };
 }

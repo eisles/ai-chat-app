@@ -91,6 +91,16 @@ function buildProductUrl(
   return imageUrl;
 }
 
+function excludeSourceProductFromResults(
+  rows: ResultRow[] | undefined,
+  sourceProductId?: string | null,
+): ResultRow[] {
+  if (!rows || rows.length === 0) return [];
+  const trimmedSourceProductId = sourceProductId?.trim();
+  if (!trimmedSourceProductId) return rows;
+  return rows.filter((row) => row.product_id !== trimmedSourceProductId);
+}
+
 export default function ProductImagesVectorizeSearchPage() {
   const [imageUrl, setImageUrl] = useState(
     "https://img.furusato-tax.jp/cdn-cgi/image/width=800,height=498,fit=pad,format=auto/img/unresized/x/product/details/20250519/sd1_5c4f2dc77bd866d82a580e200a1e13fd8e229a84.jpg",
@@ -175,7 +185,10 @@ export default function ProductImagesVectorizeSearchPage() {
     }
   }
 
-  async function runSearch(targetUrl: string) {
+  async function runSearch(
+    targetUrl: string,
+    sourceProductId?: string | null,
+  ) {
     const trimmed = targetUrl.trim();
     if (!trimmed) {
       setResult({ ok: false, error: "画像URLが必要です。" });
@@ -205,9 +218,19 @@ export default function ProductImagesVectorizeSearchPage() {
           error: `Failed to parse response (status ${res.status})`,
         };
       }
-      setResult(data);
+      const filteredResults = excludeSourceProductFromResults(
+        data.results,
+        sourceProductId,
+      );
+      const nextData: ApiResult = data.ok
+        ? {
+            ...data,
+            results: filteredResults,
+          }
+        : data;
+      setResult(nextData);
       if (data.ok) {
-        updateSearchHistory(trimmed, data.results?.length ?? 0);
+        updateSearchHistory(trimmed, filteredResults.length);
       }
     } catch (error) {
       setResult({
@@ -514,7 +537,7 @@ export default function ProductImagesVectorizeSearchPage() {
                                 disabled={!canSearch || isSubmitting}
                                 onClick={() => {
                                   if (!canSearch) return;
-                                  void runSearch(row.image_url);
+                                  void runSearch(row.image_url, row.product_id);
                                 }}
                               >
                                 {!canSearch
