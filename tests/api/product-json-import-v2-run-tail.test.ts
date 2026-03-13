@@ -118,7 +118,7 @@ describe("POST /api/product-json-import-v2/run-tail", () => {
     const req = new Request("http://localhost/api/product-json-import-v2/run-tail", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jobId: "job-1", limit: 10 }),
+      body: JSON.stringify({ jobId: "job-1", limit: 10, vectorizeConcurrency: 2 }),
     });
 
     const res = await POST(req);
@@ -231,6 +231,7 @@ describe("POST /api/product-json-import-v2/run-tail", () => {
     expect(json.retried).toBe(1);
     expect(json.failed).toBe(0);
     expect(json.http429Count).toBe(1);
+    expect(json.effectiveVectorizeConcurrency).toBe(1);
   });
 
   it("loops over multiple tail batches within one request", async () => {

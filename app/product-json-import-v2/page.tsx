@@ -137,6 +137,7 @@ type RunResponse = {
   retried?: number;
   released?: number;
   http429Count?: number;
+  effectiveVectorizeConcurrency?: number;
   timeBudgetMs?: number;
   itemReports?: Array<{
     itemId: string;
@@ -160,6 +161,7 @@ type RunTailResponse = {
   retried?: number;
   failed?: number;
   http429Count?: number;
+  effectiveVectorizeConcurrency?: number;
   timeBudgetMs?: number;
   tailStats?: JobResponse["tailStats"];
   error?: string;
@@ -171,6 +173,7 @@ type TailRunSummary = {
   retried: number;
   failed: number;
   http429Count: number;
+  effectiveVectorizeConcurrency: number | null;
   requests: number;
   completed: boolean;
   stoppedReason: string | null;
@@ -477,6 +480,12 @@ export default function ProductJsonImportV2Page() {
       throw new Error(data.error ?? "バッチ処理に失敗しました");
     }
     setLastRun(data);
+    if (
+      typeof data.effectiveVectorizeConcurrency === "number" &&
+      data.effectiveVectorizeConcurrency < (parseInt(vectorizeConcurrency, 10) || 2)
+    ) {
+      setVectorizeConcurrency(String(data.effectiveVectorizeConcurrency));
+    }
     if (data.job) {
       setJob(data.job);
       return data.job;
@@ -966,6 +975,7 @@ export default function ProductJsonImportV2Page() {
     let totalRetried = 0;
     let totalFailed = 0;
     let totalHttp429 = 0;
+    let effectiveVectorizeConcurrency: number | null = null;
     let requests = 0;
     let completed = false;
     let stoppedReason: string | null = null;
@@ -978,6 +988,8 @@ export default function ProductJsonImportV2Page() {
         body: JSON.stringify({
           jobId: target.id,
           timeBudgetMs: parseInt(timeBudgetMs, 10) || 25_000,
+          vectorizeConcurrency:
+            effectiveVectorizeConcurrency ?? (parseInt(vectorizeConcurrency, 10) || 2),
         }),
       });
       const data = await readJsonResponse<RunTailResponse>(res);
@@ -991,6 +1003,13 @@ export default function ProductJsonImportV2Page() {
       totalRetried += data.retried ?? 0;
       totalFailed += data.failed ?? 0;
       totalHttp429 += data.http429Count ?? 0;
+      effectiveVectorizeConcurrency = data.effectiveVectorizeConcurrency ?? null;
+      if (
+        typeof effectiveVectorizeConcurrency === "number" &&
+        effectiveVectorizeConcurrency < (parseInt(vectorizeConcurrency, 10) || 2)
+      ) {
+        setVectorizeConcurrency(String(effectiveVectorizeConcurrency));
+      }
       latestTailStats = data.tailStats;
 
       const pendingCount = data.tailStats?.pendingCount ?? 0;
@@ -1005,6 +1024,7 @@ export default function ProductJsonImportV2Page() {
           retried: totalRetried,
           failed: totalFailed,
           http429Count: totalHttp429,
+          effectiveVectorizeConcurrency,
           requests,
           completed: pendingCount === 0 && processingCount === 0,
           stoppedReason: null,
@@ -1041,6 +1061,7 @@ export default function ProductJsonImportV2Page() {
         retried: totalRetried,
         failed: totalFailed,
         http429Count: totalHttp429,
+        effectiveVectorizeConcurrency,
         requests,
         completed,
         stoppedReason,
@@ -1062,6 +1083,7 @@ export default function ProductJsonImportV2Page() {
           retried: totalRetried,
           failed: totalFailed,
           http429Count: totalHttp429,
+          effectiveVectorizeConcurrency,
           requests,
           completed: true,
           stoppedReason: null,
@@ -1559,7 +1581,9 @@ export default function ProductJsonImportV2Page() {
                 processed={currentTailSummary.processed} / success=
                 {currentTailSummary.success} / retried={currentTailSummary.retried} /
                 failed={currentTailSummary.failed} / http429=
-                {currentTailSummary.http429Count} / requests={currentTailSummary.requests}
+                {currentTailSummary.http429Count} / effective_vectorize=
+                {currentTailSummary.effectiveVectorizeConcurrency ?? "-"} / requests=
+                {currentTailSummary.requests}
                 {currentTailSummary.completed ? " / 完了" : ""}
                 {currentTailSummary.stoppedReason
                   ? ` / ${currentTailSummary.stoppedReason}`
@@ -1574,6 +1598,7 @@ export default function ProductJsonImportV2Page() {
               <div className="mt-1 text-xs text-muted-foreground">
                 processed={lastRun.processed ?? 0} / retried={lastRun.retried ?? 0} /
                 released={lastRun.released ?? 0} / http429={lastRun.http429Count ?? 0}
+                {" / "}effective_vectorize={lastRun.effectiveVectorizeConcurrency ?? "-"}
                 {" / "}timeBudgetMs={lastRun.timeBudgetMs ?? "-"}
               </div>
             </div>
@@ -1943,6 +1968,7 @@ export default function ProductJsonImportV2Page() {
                         processed={tailRunResult.processed} / success=
                         {tailRunResult.success} / retried={tailRunResult.retried} / failed=
                         {tailRunResult.failed} / http429={tailRunResult.http429Count} /
+                        effective_vectorize={tailRunResult.effectiveVectorizeConcurrency ?? "-"} /
                         requests={tailRunResult.requests}
                         {tailRunResult.completed ? " / 完了" : ""}
                         {tailRunResult.stoppedReason

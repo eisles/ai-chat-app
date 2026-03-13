@@ -19,6 +19,7 @@ const DEFAULT_TIME_BUDGET_MS = 25_000;
 const MAX_RETRY_ATTEMPTS = 5;
 const MAX_RETRY_DELAY_SECONDS = 60;
 const VECTOR_TAIL_STALE_SECONDS = 120;
+const MAX_VECTOR_TAIL_CONCURRENCY = 2;
 
 function parseConcurrency(value: string | undefined, fallback: number, max: number) {
   const parsed = value ? Number(value) : NaN;
@@ -29,7 +30,7 @@ function parseConcurrency(value: string | undefined, fallback: number, max: numb
 const VECTOR_TAIL_CONCURRENCY = parseConcurrency(
   process.env.PRODUCT_IMPORT_V2_VECTOR_TAIL_CONCURRENCY,
   1,
-  2
+  MAX_VECTOR_TAIL_CONCURRENCY
 );
 
 class ApiError extends Error {
@@ -45,7 +46,18 @@ type RunTailPayload = {
   jobId?: unknown;
   limit?: unknown;
   timeBudgetMs?: unknown;
+  vectorizeConcurrency?: unknown;
 };
+
+function parseConcurrencyOverride(value: unknown, fallback: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.min(max, Math.floor(value)));
+}
+
+function lowerConcurrencyOn429(current: number, errorCode: string): number {
+  if (errorCode !== "http_429") return current;
+  return Math.max(1, current - 1);
+}
 
 function parseLimit(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -158,6 +170,11 @@ export async function POST(req: Request) {
     if (!job) {
       throw new ApiError("jobが見つかりません", 404);
     }
+    const requestedVectorizeConcurrency = parseConcurrencyOverride(
+      payload.vectorizeConcurrency,
+      VECTOR_TAIL_CONCURRENCY,
+      MAX_VECTOR_TAIL_CONCURRENCY
+    );
     const limit = parseLimit(payload.limit);
     const timeBudgetMs = parseTimeBudgetMs(payload.timeBudgetMs);
     const deadline = Date.now() + timeBudgetMs;
@@ -172,6 +189,7 @@ export async function POST(req: Request) {
     let failed = 0;
     let processed = 0;
     let http429Count = 0;
+    let currentVectorizeConcurrency = requestedVectorizeConcurrency;
 
     while (Date.now() <= deadline - 500) {
       const items = await claimPendingVectorizeTailItems({
@@ -183,6 +201,7 @@ export async function POST(req: Request) {
       }
 
       processed += items.length;
+      let batchSaw429 = false;
 
       await runWithConcurrency(
         items.map((item) => async () => {
@@ -204,6 +223,7 @@ export async function POST(req: Request) {
             const classified = classifyRetry(error);
             if (classified.errorCode === "http_429") {
               http429Count += 1;
+              batchSaw429 = true;
             }
             const retryable =
               classified.retryable && item.attemptCount < MAX_RETRY_ATTEMPTS;
@@ -226,8 +246,15 @@ export async function POST(req: Request) {
             failed += 1;
           }
         }),
-        VECTOR_TAIL_CONCURRENCY
+        currentVectorizeConcurrency
       );
+
+      if (batchSaw429) {
+        currentVectorizeConcurrency = lowerConcurrencyOn429(
+          currentVectorizeConcurrency,
+          "http_429"
+        );
+      }
     }
 
     const tailStats = await getVectorizeTailStats(jobId);
@@ -238,6 +265,7 @@ export async function POST(req: Request) {
       retried,
       failed,
       http429Count,
+      effectiveVectorizeConcurrency: currentVectorizeConcurrency,
       timeBudgetMs,
       tailStats,
     });

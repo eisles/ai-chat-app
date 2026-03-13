@@ -103,6 +103,11 @@ type RunPayload = {
   vectorizeConcurrency?: unknown;
 };
 
+function lowerConcurrencyOn429(current: number, errorCode: string): number {
+  if (errorCode !== "http_429") return current;
+  return Math.max(1, current - 1);
+}
+
 function parseLimit(value: unknown) {
   if (typeof value === "number" && Number.isFinite(value)) {
     return Math.max(1, Math.min(20, Math.floor(value)));
@@ -677,6 +682,7 @@ export async function POST(req: Request) {
         retried: 0,
         released: 0,
         http429Count: 0,
+        effectiveVectorizeConcurrency: vectorizeConcurrency,
       });
     }
 
@@ -697,6 +703,7 @@ export async function POST(req: Request) {
     let retried = 0;
     let released = 0;
     let http429Count = 0;
+    let currentVectorizeConcurrency = vectorizeConcurrency;
     const itemReports: ItemReport[] = [];
     const isLightJob = job.doTextEmbedding && !job.doImageCaptions && !job.doImageVectors;
     const claimLimit = isLightJob ? limit : Math.min(limit, HEAVY_JOB_CLAIM_LIMIT);
@@ -819,7 +826,7 @@ export async function POST(req: Request) {
               doImageVectors: job.doImageVectors,
               captionImageInput: job.captionImageInput,
               captionConcurrency,
-              vectorizeConcurrency,
+              vectorizeConcurrency: currentVectorizeConcurrency,
               maxVectorizeHeadImages,
               knownProductJsonExists: item.product_id
                 ? existingTextIds.has(item.product_id)
@@ -865,6 +872,10 @@ export async function POST(req: Request) {
             const { retryable, errorCode } = classifyRetry(error);
             if (errorCode === "http_429") {
               http429Count += 1;
+              currentVectorizeConcurrency = lowerConcurrencyOn429(
+                currentVectorizeConcurrency,
+                errorCode
+              );
             }
 
             if (retryable && item.attempt_count < MAX_RETRY_ATTEMPTS) {
@@ -982,7 +993,7 @@ export async function POST(req: Request) {
             doImageVectors: job.doImageVectors,
             captionImageInput: job.captionImageInput,
             captionConcurrency,
-            vectorizeConcurrency,
+            vectorizeConcurrency: currentVectorizeConcurrency,
             maxVectorizeHeadImages,
             knownProductJsonExists: item.product_id
               ? existingTextIds.has(item.product_id)
@@ -1028,6 +1039,10 @@ export async function POST(req: Request) {
           const { retryable, errorCode } = classifyRetry(error);
           if (errorCode === "http_429") {
             http429Count += 1;
+            currentVectorizeConcurrency = lowerConcurrencyOn429(
+              currentVectorizeConcurrency,
+              errorCode
+            );
           }
 
           if (retryable && item.attempt_count < MAX_RETRY_ATTEMPTS) {
@@ -1091,6 +1106,7 @@ export async function POST(req: Request) {
       retried,
       released,
       http429Count,
+      effectiveVectorizeConcurrency: currentVectorizeConcurrency,
       timeBudgetMs,
       itemReports: debugTimings ? itemReports.slice(-50) : undefined,
     });
