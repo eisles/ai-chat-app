@@ -7,6 +7,7 @@ import {
   getFailedItemsV2,
   getImportJobV2,
   getProcessingItemsV2,
+  getVectorizeTailStats,
 } from "@/lib/product-json-import-v2";
 import {
   parseExistingProductBehavior,
@@ -341,6 +342,7 @@ export async function POST(req: Request) {
     const failedItems = await getFailedItemsV2(jobId, 5);
     const processingItems = await getProcessingItemsV2(jobId, 5);
     const queueStats = await getQueueStatsV2(jobId);
+    const tailStats = await getVectorizeTailStats(jobId);
 
     return Response.json({
       ok: true,
@@ -348,6 +350,7 @@ export async function POST(req: Request) {
       failedItems,
       processingItems,
       queueStats,
+      tailStats,
     });
   } catch (error) {
     return errorResponse(error);
@@ -367,7 +370,15 @@ export async function GET(req: Request) {
   const failedItems = await getFailedItemsV2(jobId, 5);
   const processingItems = await getProcessingItemsV2(jobId, 5);
   const queueStats = await getQueueStatsV2(jobId);
-  return Response.json({ ok: true, job, failedItems, processingItems, queueStats });
+  const tailStats = await getVectorizeTailStats(jobId);
+  return Response.json({
+    ok: true,
+    job,
+    failedItems,
+    processingItems,
+    queueStats,
+    tailStats,
+  });
 }
 
 export function OPTIONS() {

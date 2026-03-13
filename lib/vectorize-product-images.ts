@@ -403,6 +403,19 @@ export async function checkExistingProductImagesVectorize(options: {
   return rows.length > 0;
 }
 
+export async function getVectorizedSlideIndexes(
+  productId: string
+): Promise<Set<number>> {
+  const db = await ensureProductImagesVectorizeTable();
+  const rows = (await db`
+    select slide_index
+    from public.product_images_vectorize
+    where product_id = ${productId}
+      and embedding is not null
+  `) as Array<{ slide_index: number }>;
+  return new Set(rows.map((row) => Number(row.slide_index)));
+}
+
 export async function getExistingVectorizedProductIds(options: {
   productIds: string[];
 }): Promise<Set<string>> {

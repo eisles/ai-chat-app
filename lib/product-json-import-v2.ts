@@ -1,6 +1,9 @@
 import { ensureProductTextEmbeddingsInitialized } from "@/lib/image-text-search";
 import { getDb } from "@/lib/neon";
-import { ensureProductImagesVectorizeInitialized } from "@/lib/vectorize-product-images";
+import {
+  ensureProductImagesVectorizeInitialized,
+  getVectorizedSlideIndexes,
+} from "@/lib/vectorize-product-images";
 import type { ExistingProductBehavior } from "@/lib/product-import-behavior";
 import { randomUUID } from "crypto";
 
@@ -36,6 +39,32 @@ export type ImportQueueStatsV2 = {
   successCount: number;
   failedCount: number;
   skippedCount: number;
+  nextRetryAt: string | null;
+};
+
+export type VectorizeTailItem = {
+  id: string;
+  jobId: string;
+  importItemId: string;
+  productId: string;
+  cityCode: string | null;
+  imageUrl: string;
+  slideIndex: number;
+  status: "pending" | "processing" | "success" | "failed";
+  attemptCount: number;
+  nextRetryAt: string | null;
+  error: string | null;
+  errorCode: string | null;
+  processingStartedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type VectorizeTailStats = {
+  pendingCount: number;
+  processingCount: number;
+  successCount: number;
+  failedCount: number;
   nextRetryAt: string | null;
 };
 
@@ -182,6 +211,77 @@ export async function ensureProductImportTablesV2() {
   await db`
     create index if not exists product_import_items_v2_retry_idx
       on public.product_import_items_v2(job_id, status, next_retry_at, row_index)
+  `;
+
+  await db`
+    create table if not exists public.product_import_vectorize_tail_items (
+      id uuid primary key,
+      job_id uuid not null references public.product_import_jobs_v2(id) on delete cascade,
+      import_item_id uuid not null references public.product_import_items_v2(id) on delete cascade,
+      product_id text not null,
+      city_code text,
+      image_url text not null,
+      slide_index integer not null,
+      status text not null default 'pending',
+      error text,
+      attempt_count integer not null default 0,
+      next_retry_at timestamptz,
+      error_code text,
+      processing_started_at timestamptz,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+  `;
+  await db`
+    alter table public.product_import_vectorize_tail_items
+    add column if not exists attempt_count integer not null default 0
+  `;
+  await db`
+    alter table public.product_import_vectorize_tail_items
+    alter column attempt_count set default 0
+  `;
+  await db`
+    alter table public.product_import_vectorize_tail_items
+    add column if not exists next_retry_at timestamptz
+  `;
+  await db`
+    alter table public.product_import_vectorize_tail_items
+    add column if not exists error_code text
+  `;
+  await db`
+    alter table public.product_import_vectorize_tail_items
+    add column if not exists processing_started_at timestamptz
+  `;
+  await db`
+    alter table public.product_import_vectorize_tail_items
+    add column if not exists created_at timestamptz not null default now()
+  `;
+  await db`
+    alter table public.product_import_vectorize_tail_items
+    add column if not exists updated_at timestamptz not null default now()
+  `;
+  await db`
+    do $$
+    begin
+      if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'product_import_vectorize_tail_items_unique_item_slide'
+      ) then
+        alter table public.product_import_vectorize_tail_items
+        add constraint product_import_vectorize_tail_items_unique_item_slide
+        unique (import_item_id, slide_index);
+      end if;
+    end
+    $$;
+  `;
+  await db`
+    create index if not exists product_import_vectorize_tail_items_job_status_idx
+      on public.product_import_vectorize_tail_items(job_id, status, next_retry_at, slide_index)
+  `;
+  await db`
+    create index if not exists product_import_vectorize_tail_items_product_status_idx
+      on public.product_import_vectorize_tail_items(product_id, status, slide_index)
   `;
   return db;
 }
@@ -739,6 +839,302 @@ export async function updateItemStepV2(options: {
         updated_at = now()
     where id = ${options.itemId}
   `;
+}
+
+export async function enqueueVectorizeTailItems(options: {
+  jobId: string;
+  importItemId: string;
+  productId: string;
+  cityCode: string | null;
+  items: Array<{ imageUrl: string; slideIndex: number }>;
+}): Promise<number> {
+  const db = await ensureProductImportTablesV2();
+  const normalizedItems = options.items
+    .map((item) => ({
+      imageUrl: item.imageUrl.trim(),
+      slideIndex: Math.floor(item.slideIndex),
+    }))
+    .filter(
+      (item) =>
+        item.imageUrl.length > 0 &&
+        Number.isFinite(item.slideIndex) &&
+        item.slideIndex >= 0
+    );
+
+  if (normalizedItems.length === 0) {
+    await db`
+      delete from public.product_import_vectorize_tail_items
+      where import_item_id = ${options.importItemId}
+    `;
+    return 0;
+  }
+
+  const ids = normalizedItems.map(() => randomUUID());
+  const imageUrls = normalizedItems.map((item) => item.imageUrl);
+  const slideIndexes = normalizedItems.map((item) => item.slideIndex);
+
+  await db`
+    delete from public.product_import_vectorize_tail_items
+    where import_item_id = ${options.importItemId}
+      and not (slide_index = any(${slideIndexes}::int[]))
+  `;
+
+  const rows = (await db`
+    insert into public.product_import_vectorize_tail_items (
+      id,
+      job_id,
+      import_item_id,
+      product_id,
+      city_code,
+      image_url,
+      slide_index,
+      status
+    )
+    select
+      x.id,
+      ${options.jobId},
+      ${options.importItemId},
+      ${options.productId},
+      ${options.cityCode},
+      x.image_url,
+      x.slide_index,
+      'pending'
+    from unnest(
+      ${ids}::uuid[],
+      ${imageUrls}::text[],
+      ${slideIndexes}::int[]
+    ) as x(id, image_url, slide_index)
+    on conflict (import_item_id, slide_index) do update
+    set job_id = excluded.job_id,
+        product_id = excluded.product_id,
+        city_code = excluded.city_code,
+        image_url = excluded.image_url,
+        status = 'pending',
+        error = null,
+        error_code = null,
+        next_retry_at = null,
+        processing_started_at = null,
+        updated_at = now()
+    returning id
+  `) as Array<{ id: string }>;
+
+  return rows.length;
+}
+
+export async function getVectorizeTailStats(
+  jobId: string
+): Promise<VectorizeTailStats> {
+  const db = await ensureProductImportTablesV2();
+  const rows = (await db`
+    select
+      count(*) filter (where status = 'pending') as pending_count,
+      count(*) filter (where status = 'processing') as processing_count,
+      count(*) filter (where status = 'success') as success_count,
+      count(*) filter (where status = 'failed') as failed_count,
+      min(next_retry_at) filter (
+        where status = 'pending'
+          and next_retry_at > now()
+      ) as next_retry_at
+    from public.product_import_vectorize_tail_items
+    where job_id = ${jobId}
+  `) as Array<{
+    pending_count: number;
+    processing_count: number;
+    success_count: number;
+    failed_count: number;
+    next_retry_at: Date | null;
+  }>;
+
+  const row = rows[0];
+  return {
+    pendingCount: Number(row?.pending_count ?? 0),
+    processingCount: Number(row?.processing_count ?? 0),
+    successCount: Number(row?.success_count ?? 0),
+    failedCount: Number(row?.failed_count ?? 0),
+    nextRetryAt: row?.next_retry_at ? row.next_retry_at.toISOString() : null,
+  };
+}
+
+export async function claimPendingVectorizeTailItems(options: {
+  jobId: string;
+  limit: number;
+}): Promise<VectorizeTailItem[]> {
+  const db = await ensureProductImportTablesV2();
+  const safeLimit = Math.max(1, Math.min(100, Math.floor(options.limit)));
+  const pickedIds = (await db`
+    select id
+    from public.product_import_vectorize_tail_items
+    where job_id = ${options.jobId}
+      and status = 'pending'
+      and (next_retry_at is null or next_retry_at <= now())
+    order by slide_index, created_at
+    limit ${safeLimit}
+  `) as Array<{ id: string }>;
+
+  if (pickedIds.length === 0) {
+    return [];
+  }
+
+  const ids = pickedIds.map((row) => row.id);
+  const rows = (await db`
+    update public.product_import_vectorize_tail_items
+    set status = 'processing',
+        attempt_count = attempt_count + 1,
+        processing_started_at = now(),
+        updated_at = now()
+    where job_id = ${options.jobId}
+      and status = 'pending'
+      and id = any(${ids}::uuid[])
+    returning
+      id,
+      job_id,
+      import_item_id,
+      product_id,
+      city_code,
+      image_url,
+      slide_index,
+      status,
+      attempt_count,
+      next_retry_at,
+      error,
+      error_code,
+      processing_started_at,
+      created_at,
+      updated_at
+  `) as Array<{
+    id: string;
+    job_id: string;
+    import_item_id: string;
+    product_id: string;
+    city_code: string | null;
+    image_url: string;
+    slide_index: number;
+    status: "processing";
+    attempt_count: number;
+    next_retry_at: Date | null;
+    error: string | null;
+    error_code: string | null;
+    processing_started_at: Date | null;
+    created_at: Date;
+    updated_at: Date;
+  }>;
+
+  return rows.map((row) => ({
+    id: row.id,
+    jobId: row.job_id,
+    importItemId: row.import_item_id,
+    productId: row.product_id,
+    cityCode: row.city_code,
+    imageUrl: row.image_url,
+    slideIndex: Number(row.slide_index),
+    status: row.status,
+    attemptCount: Number(row.attempt_count),
+    nextRetryAt: row.next_retry_at ? row.next_retry_at.toISOString() : null,
+    error: row.error,
+    errorCode: row.error_code,
+    processingStartedAt: row.processing_started_at
+      ? row.processing_started_at.toISOString()
+      : null,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+  }));
+}
+
+export async function requeueStaleVectorizeTailItems(options: {
+  jobId: string;
+  staleSeconds: number;
+}): Promise<number> {
+  const db = await ensureProductImportTablesV2();
+  const staleSeconds = Math.max(30, Math.min(24 * 60 * 60, Math.floor(options.staleSeconds)));
+  const rows = (await db`
+    update public.product_import_vectorize_tail_items
+    set status = 'pending',
+        error = ${"stale processing item requeued"},
+        error_code = ${"stale_processing"},
+        next_retry_at = null,
+        processing_started_at = null,
+        attempt_count = greatest(attempt_count - 1, 0),
+        updated_at = now()
+    where job_id = ${options.jobId}
+      and status = 'processing'
+      and updated_at < now() - (${staleSeconds}::int * interval '1 second')
+    returning id
+  `) as Array<{ id: string }>;
+  return rows.length;
+}
+
+export async function markVectorizeTailItemSuccess(id: string): Promise<void> {
+  const db = await ensureProductImportTablesV2();
+  await db`
+    update public.product_import_vectorize_tail_items
+    set status = 'success',
+        error = null,
+        error_code = null,
+        next_retry_at = null,
+        processing_started_at = null,
+        updated_at = now()
+    where id = ${id}
+  `;
+}
+
+export async function markVectorizeTailItemFailure(options: {
+  id: string;
+  retryable: boolean;
+  error: string;
+  errorCode: string;
+  retryAfterSeconds?: number;
+}): Promise<void> {
+  const db = await ensureProductImportTablesV2();
+  await db`
+    update public.product_import_vectorize_tail_items
+    set status = ${options.retryable ? "pending" : "failed"},
+        error = ${options.error},
+        error_code = ${options.errorCode},
+        next_retry_at = ${
+          options.retryable
+            ? new Date(Date.now() + Math.max(1, options.retryAfterSeconds ?? 1) * 1000)
+            : null
+        },
+        processing_started_at = null,
+        updated_at = now()
+    where id = ${options.id}
+  `;
+}
+
+export async function checkExistingVectorizationComplete(options: {
+  productId: string;
+  expectedSlideIndexes: number[];
+}): Promise<boolean> {
+  const expectedSlideIndexes = Array.from(
+    new Set(
+      options.expectedSlideIndexes
+        .map((slideIndex) => Math.floor(slideIndex))
+        .filter((slideIndex) => Number.isFinite(slideIndex) && slideIndex >= 0)
+    )
+  );
+
+  if (expectedSlideIndexes.length === 0) {
+    return true;
+  }
+
+  const actualSlideIndexes = await getVectorizedSlideIndexes(options.productId);
+  for (const slideIndex of expectedSlideIndexes) {
+    if (!actualSlideIndexes.has(slideIndex)) {
+      return false;
+    }
+  }
+
+  const db = await ensureProductImportTablesV2();
+  const rows = (await db`
+    select 1
+    from public.product_import_vectorize_tail_items
+    where product_id = ${options.productId}
+      and slide_index = any(${expectedSlideIndexes}::int[])
+      and status in ('pending', 'processing', 'failed')
+    limit 1
+  `) as Array<Record<string, unknown>>;
+
+  return rows.length === 0;
 }
 
 export async function getQueueStatsV2(jobId: string): Promise<ImportQueueStatsV2> {

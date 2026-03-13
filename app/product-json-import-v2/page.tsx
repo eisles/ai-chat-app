@@ -89,6 +89,13 @@ type JobResponse = {
     skippedCount: number;
     nextRetryAt: string | null;
   };
+  tailStats?: {
+    pendingCount: number;
+    processingCount: number;
+    successCount: number;
+    failedCount: number;
+    nextRetryAt: string | null;
+  };
   error?: string;
 };
 
@@ -242,6 +249,7 @@ export default function ProductJsonImportV2Page() {
   const [failedItems, setFailedItems] = useState<FailedItem[]>([]);
   const [processingItems, setProcessingItems] = useState<ProcessingItem[]>([]);
   const [queueStats, setQueueStats] = useState<JobResponse["queueStats"] | null>(null);
+  const [tailStats, setTailStats] = useState<JobResponse["tailStats"] | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -334,6 +342,7 @@ export default function ProductJsonImportV2Page() {
     setFailedItems(data.failedItems ?? []);
     setProcessingItems(data.processingItems ?? []);
     setQueueStats(data.queueStats ?? null);
+    setTailStats(data.tailStats ?? null);
     return data;
   }
 
@@ -1235,6 +1244,11 @@ export default function ProductJsonImportV2Page() {
             {queueStats && (
               <div>
                 queue: pending_ready={queueStats.pendingReadyCount} pending_delayed={queueStats.pendingDelayedCount} processing={queueStats.processingCount} next_retry_at={formatJst(queueStats.nextRetryAt)}
+              </div>
+            )}
+            {tailStats && (
+              <div>
+                vector tail: pending={tailStats.pendingCount} processing={tailStats.processingCount} success={tailStats.successCount} failed={tailStats.failedCount} next_retry_at={formatJst(tailStats.nextRetryAt)}
               </div>
             )}
             <div>startedAt: {formatJst(job.startedAt)}</div>

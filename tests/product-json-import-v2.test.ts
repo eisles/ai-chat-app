@@ -32,6 +32,68 @@ const mockState = vi.hoisted(() => {
     ) {
       return [{ id: "00000000-0000-0000-0000-000000000001" }];
     }
+    if (
+      sql.includes("select id") &&
+      sql.includes("from public.product_import_vectorize_tail_items") &&
+      sql.includes("status = 'pending'") &&
+      sql.includes("order by slide_index, created_at")
+    ) {
+      return [{ id: "00000000-0000-0000-0000-000000000003" }];
+    }
+    if (
+      sql.includes("update public.product_import_vectorize_tail_items") &&
+      sql.includes("set status = 'processing'") &&
+      sql.includes("returning") &&
+      sql.includes("import_item_id")
+    ) {
+      return [
+        {
+          id: "00000000-0000-0000-0000-000000000003",
+          job_id: "00000000-0000-0000-0000-000000000000",
+          import_item_id: "00000000-0000-0000-0000-000000000010",
+          product_id: "1001",
+          city_code: "01101",
+          image_url: "https://example.com/slide-4.jpg",
+          slide_index: 4,
+          status: "processing",
+          attempt_count: 2,
+          next_retry_at: null,
+          error: null,
+          error_code: null,
+          processing_started_at: new Date("2026-03-13T09:00:00.000Z"),
+          created_at: new Date("2026-03-13T08:59:00.000Z"),
+          updated_at: new Date("2026-03-13T09:00:00.000Z"),
+        },
+      ];
+    }
+    if (
+      sql.includes("from public.product_import_vectorize_tail_items") &&
+      sql.includes("count(*) filter (where status = 'pending') as pending_count")
+    ) {
+      return [
+        {
+          pending_count: 2,
+          processing_count: 1,
+          success_count: 3,
+          failed_count: 1,
+          next_retry_at: new Date("2026-03-13T10:00:00.000Z"),
+        },
+      ];
+    }
+    if (
+      sql.includes("select 1") &&
+      sql.includes("from public.product_import_vectorize_tail_items") &&
+      sql.includes("status in ('pending', 'processing', 'failed')")
+    ) {
+      return [{ exists: 1 }];
+    }
+    if (
+      sql.includes("select slide_index") &&
+      sql.includes("from public.product_images_vectorize") &&
+      sql.includes("embedding is not null")
+    ) {
+      return [{ slide_index: 0 }, { slide_index: 1 }];
+    }
     return [];
   };
   return { calls, db };
@@ -45,12 +107,18 @@ vi.mock("@/lib/neon", () => {
 
 import {
   appendImportItemsV2,
+  checkExistingVectorizationComplete,
+  claimPendingVectorizeTailItems,
   createImportJobV2,
   deleteDownstreamForJobV2,
+  enqueueVectorizeTailItems,
   getQueueStatsV2,
+  getVectorizeTailStats,
   INSERT_IMPORT_ITEMS_BATCH_SIZE,
   markItemsSkippedBulkV2,
+  markVectorizeTailItemFailure,
   requeueStaleProcessingItemsV2,
+  requeueStaleVectorizeTailItems,
 } from "@/lib/product-json-import-v2";
 import { claimPendingItemsV2 } from "@/lib/product-json-import-v2";
 import { getExistingProductIdsForSources } from "@/lib/image-text-search";
@@ -233,5 +301,112 @@ describe("product-json-import-v2", () => {
       (x) => x.sql.includes("delete from public.product_images_vectorize")
     );
     expect(imageDelete).toBeTruthy();
+  });
+
+  it("enqueues vector tail items with upsert and stale-slide cleanup", async () => {
+    await enqueueVectorizeTailItems({
+      jobId: "00000000-0000-0000-0000-000000000000",
+      importItemId: "00000000-0000-0000-0000-000000000010",
+      productId: "1001",
+      cityCode: "01101",
+      items: [
+        { imageUrl: "https://example.com/slide-4.jpg", slideIndex: 4 },
+        { imageUrl: "https://example.com/slide-5.jpg", slideIndex: 5 },
+      ],
+    });
+
+    const cleanupCall = mockState.calls.find(
+      (x) =>
+        x.sql.includes("delete from public.product_import_vectorize_tail_items") &&
+        x.sql.includes("not (slide_index = any(")
+    );
+    expect(cleanupCall).toBeTruthy();
+
+    const insertCall = mockState.calls.find(
+      (x) =>
+        x.sql.includes("insert into public.product_import_vectorize_tail_items") &&
+        x.sql.toLowerCase().includes("from unnest(") &&
+        x.sql.includes("on conflict (import_item_id, slide_index) do update")
+    );
+    expect(insertCall).toBeTruthy();
+  });
+
+  it("claims pending vector tail items with retry window and attempt_count increment", async () => {
+    await claimPendingVectorizeTailItems({
+      jobId: "00000000-0000-0000-0000-000000000000",
+      limit: 10,
+    });
+
+    const updateCall = mockState.calls.find(
+      (x) =>
+        x.sql.includes("update public.product_import_vectorize_tail_items") &&
+        x.sql.includes("attempt_count = attempt_count + 1")
+    );
+    expect(updateCall).toBeTruthy();
+  });
+
+  it("queries vector tail stats", async () => {
+    const stats = await getVectorizeTailStats(
+      "00000000-0000-0000-0000-000000000000"
+    );
+
+    expect(stats).toEqual({
+      pendingCount: 2,
+      processingCount: 1,
+      successCount: 3,
+      failedCount: 1,
+      nextRetryAt: "2026-03-13T10:00:00.000Z",
+    });
+  });
+
+  it("requeues stale vector tail items back to pending", async () => {
+    await requeueStaleVectorizeTailItems({
+      jobId: "00000000-0000-0000-0000-000000000000",
+      staleSeconds: 120,
+    });
+
+    const call = mockState.calls.find((x) => {
+      if (!x.sql.includes("update public.product_import_vectorize_tail_items")) {
+        return false;
+      }
+      return x.values.some((value) => value === "stale_processing");
+    });
+    expect(call).toBeTruthy();
+  });
+
+  it("checks vector completion against slide coverage and tail backlog", async () => {
+    const complete = await checkExistingVectorizationComplete({
+      productId: "1001",
+      expectedSlideIndexes: [0, 1],
+    });
+
+    expect(complete).toBe(false);
+    const tailCheckCall = mockState.calls.find(
+      (x) =>
+        x.sql.includes("from public.product_import_vectorize_tail_items") &&
+        x.sql.includes("status in ('pending', 'processing', 'failed')")
+    );
+    expect(tailCheckCall).toBeTruthy();
+  });
+
+  it("marks vector tail failure without touching import job counters", async () => {
+    await markVectorizeTailItemFailure({
+      id: "00000000-0000-0000-0000-000000000003",
+      retryable: false,
+      error: "boom",
+      errorCode: "unknown",
+    });
+
+    const tailUpdate = mockState.calls.find(
+      (x) =>
+        x.sql.includes("update public.product_import_vectorize_tail_items") &&
+        x.values.includes("boom")
+    );
+    expect(tailUpdate).toBeTruthy();
+
+    const jobUpdate = mockState.calls.find(
+      (x) => x.sql.includes("update public.product_import_jobs_v2")
+    );
+    expect(jobUpdate).toBeFalsy();
   });
 });

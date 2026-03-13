@@ -1,5 +1,7 @@
 import {
+  checkExistingVectorizationComplete,
   claimPendingItemsV2,
+  enqueueVectorizeTailItems,
   getImportJobV2,
   markJobStartedV2,
   markItemsSkippedBulkV2,
@@ -23,9 +25,7 @@ import {
 } from "@/lib/image-text-search";
 import {
   deleteProductImagesVectorize,
-  checkExistingProductImagesVectorize,
   embedOrReuseImageEmbedding,
-  getExistingVectorizedProductIds,
   upsertProductImagesVectorize,
 } from "@/lib/vectorize-product-images";
 
@@ -40,6 +40,7 @@ const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 
 const DEFAULT_LIMIT = 5;
 const DEFAULT_TIME_BUDGET_MS = 10_000;
+const MAX_VECTORIZE_HEAD_IMAGES = 4;
 const MAX_RETRY_ATTEMPTS = 5;
 const MAX_RETRY_DELAY_SECONDS = 60;
 const STALE_PROCESSING_SECONDS = 120;
@@ -241,6 +242,7 @@ function normalizeProduct(options: {
 }
 
 type StepTiming = { step: string; ms: number };
+type VectorizeImageTarget = { imageUrl: string; slideIndex: number };
 type ItemReport = {
   itemId: string;
   rowIndex: number;
@@ -253,6 +255,36 @@ type ItemReport = {
   errorCode?: string | null;
   retryAfterSeconds?: number | null;
 };
+
+function collectVectorizeImages(options: {
+  mainUrl: string | null;
+  slideImageUrls: Array<string | null | undefined>;
+}): VectorizeImageTarget[] {
+  const images: VectorizeImageTarget[] = [];
+  const mainUrl = options.mainUrl?.trim();
+  if (mainUrl) {
+    images.push({ imageUrl: mainUrl, slideIndex: 0 });
+  }
+
+  for (let index = 0; index < options.slideImageUrls.length; index += 1) {
+    const imageUrl = options.slideImageUrls[index]?.trim();
+    if (!imageUrl) continue;
+    images.push({ imageUrl, slideIndex: index + 1 });
+  }
+
+  return images;
+}
+
+function splitVectorizeImages(options: {
+  images: VectorizeImageTarget[];
+  maxHeadImages: number;
+}): { head: VectorizeImageTarget[]; tail: VectorizeImageTarget[] } {
+  const safeMaxHeadImages = Math.max(0, Math.floor(options.maxHeadImages));
+  return {
+    head: options.images.slice(0, safeMaxHeadImages),
+    tail: options.images.slice(safeMaxHeadImages),
+  };
+}
 
 async function runWithConcurrency<T>(
   tasks: Array<() => Promise<T>>,
@@ -280,6 +312,7 @@ async function runWithConcurrency<T>(
 }
 
 async function processProductItem(options: {
+  jobId: string;
   itemId: string;
   productJson: string;
   productId: string | null;
@@ -293,7 +326,6 @@ async function processProductItem(options: {
   vectorizeConcurrency: number;
   knownProductJsonExists?: boolean;
   knownCaptionExists?: boolean;
-  knownVectorExists?: boolean;
   debugTimings: boolean;
 }): Promise<{ outcome: "processed" | "skipped"; steps: StepTiming[] }> {
   const steps: StepTiming[] = [];
@@ -342,6 +374,10 @@ async function processProductItem(options: {
     product.slide_image7 ?? undefined,
     product.slide_image8 ?? undefined,
   ];
+  const vectorImages = collectVectorizeImages({
+    mainUrl: typeof product.image === "string" ? product.image : null,
+    slideImageUrls,
+  });
 
   // 既存データの扱い:
   // - skip: 選択した処理（テキスト/キャプション/画像ベクトル）が全て「既に存在」するなら何もしない
@@ -369,10 +405,10 @@ async function processProductItem(options: {
         }))
       : true;
     const vectorsExist = options.doImageVectors
-      ? options.knownVectorExists ??
-        (await checkExistingProductImagesVectorize({
+      ? await checkExistingVectorizationComplete({
           productId,
-        }))
+          expectedSlideIndexes: vectorImages.map((item) => item.slideIndex),
+        })
       : true;
 
     if (textExists && captionsExist && vectorsExist) {
@@ -474,45 +510,40 @@ async function processProductItem(options: {
 
   if (options.doImageVectors) {
     tasks.push(async () => {
-      // embed+upsert per image with bounded concurrency
-      const vectorTasks: Array<() => Promise<void>> = [];
+      const { head, tail } = splitVectorizeImages({
+        images: vectorImages,
+        maxHeadImages: MAX_VECTORIZE_HEAD_IMAGES,
+      });
+      const vectorTasks = head.map((item) => async () => {
+        const stepName =
+          item.slideIndex === 0
+            ? "vectorize_main"
+            : `vectorize_slide_${item.slideIndex}`;
 
-      const mainUrl = product.image ?? null;
-      if (mainUrl && mainUrl.trim()) {
-        vectorTasks.push(async () => {
-          await timeStep("vectorize_main", async () => {
-            const embedding = await embedOrReuseImageEmbedding(mainUrl);
-            await upsertProductImagesVectorize({
-              productId,
-              cityCode: product.city_code ?? null,
-              imageUrl: mainUrl,
-              imageEmbedding: embedding,
-              slideIndex: 0,
-            });
+        await timeStep(stepName, async () => {
+          const embedding = await embedOrReuseImageEmbedding(item.imageUrl);
+          await upsertProductImagesVectorize({
+            productId,
+            cityCode: product.city_code ?? null,
+            imageUrl: item.imageUrl,
+            imageEmbedding: embedding,
+            slideIndex: item.slideIndex,
           });
         });
-      }
-
-      for (let i = 0; i < slideImageUrls.length; i++) {
-        const url = slideImageUrls[i];
-        if (!url || !url.trim()) continue;
-        const slideIndex = i + 1;
-        vectorTasks.push(async () => {
-          await timeStep(`vectorize_slide_${slideIndex}`, async () => {
-            const embedding = await embedOrReuseImageEmbedding(url);
-            await upsertProductImagesVectorize({
-              productId,
-              cityCode: product.city_code ?? null,
-              imageUrl: url,
-              imageEmbedding: embedding,
-              slideIndex,
-            });
-          });
-        });
-      }
+      });
 
       await timeStep("vectorize_images_total", async () => {
         await runWithConcurrency(vectorTasks, options.vectorizeConcurrency);
+      });
+
+      await timeStep("enqueue_vectorize_tail", async () => {
+        await enqueueVectorizeTailItems({
+          jobId: options.jobId,
+          importItemId: options.itemId,
+          productId,
+          cityCode: product.city_code ?? null,
+          items: tail,
+        });
       });
     });
   }
@@ -630,7 +661,10 @@ export async function POST(req: Request) {
         );
 
       // skip の場合: product_id がある行はまとめて「既存判定」して早めにスキップできる
-      const [existingTextIds, existingCaptionIds, existingVectorIds] =
+      const canUseBulkSkip =
+        job.existingBehavior === "skip" && !job.doImageVectors;
+
+      const [existingTextIds, existingCaptionIds] =
         job.existingBehavior === "skip"
           ? await Promise.all([
               job.doTextEmbedding
@@ -645,24 +679,19 @@ export async function POST(req: Request) {
                     sources: [...CAPTION_TEXT_SOURCES],
                   })
                 : Promise.resolve(new Set<string>()),
-              job.doImageVectors
-                ? getExistingVectorizedProductIds({
-                    productIds,
-                  })
-                : Promise.resolve(new Set<string>()),
             ])
-          : [new Set<string>(), new Set<string>(), new Set<string>()];
+          : [new Set<string>(), new Set<string>()];
 
       const shouldSkipByDownstream = (productId: string) => {
         if (job.doTextEmbedding && !existingTextIds.has(productId)) return false;
         if (job.doImageCaptions && !existingCaptionIds.has(productId)) return false;
-        if (job.doImageVectors && !existingVectorIds.has(productId)) return false;
+        if (job.doImageVectors && !canUseBulkSkip) return false;
         return true;
       };
 
       // 全件スキップが多いケースを高速化（1件ずつmarkしない）
       let skippedIdSet = new Set<string>();
-      if (job.existingBehavior === "skip") {
+      if (canUseBulkSkip) {
         const skipItemIds = items
           .filter((item) => item.product_id && shouldSkipByDownstream(item.product_id))
           .map((item) => item.id);
@@ -717,6 +746,7 @@ export async function POST(req: Request) {
         const tasks = remainingItems.map((item) => async () => {
           try {
             const { outcome, steps } = await processProductItem({
+              jobId,
               itemId: item.id,
               productJson: item.product_json,
               productId: item.product_id,
@@ -733,9 +763,6 @@ export async function POST(req: Request) {
                 : undefined,
               knownCaptionExists: item.product_id
                 ? existingCaptionIds.has(item.product_id)
-                : undefined,
-              knownVectorExists: item.product_id
-                ? existingVectorIds.has(item.product_id)
                 : undefined,
               debugTimings,
             });
@@ -878,6 +905,7 @@ export async function POST(req: Request) {
 
         try {
           const { outcome, steps } = await processProductItem({
+            jobId,
             itemId: item.id,
             productJson: item.product_json,
             productId: item.product_id,
@@ -894,9 +922,6 @@ export async function POST(req: Request) {
               : undefined,
             knownCaptionExists: item.product_id
               ? existingCaptionIds.has(item.product_id)
-              : undefined,
-            knownVectorExists: item.product_id
-              ? existingVectorIds.has(item.product_id)
               : undefined,
             debugTimings,
           });
