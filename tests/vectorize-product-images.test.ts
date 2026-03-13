@@ -107,6 +107,7 @@ describe("embedOrReuseImageEmbedding", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result.downloadDurationMs).toBeTypeOf("number");
     expect(result.apiDurationMs).toBeTypeOf("number");
+    expect(result.retryWaitDurationMs).toBe(0);
     expect(result.vectorizeAttempts).toBe(1);
   });
 
@@ -158,6 +159,7 @@ describe("embedOrReuseImageEmbedding", () => {
     expect(result.source).toBe("vectorize_api");
     expect(result.vector).toHaveLength(512);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.retryWaitDurationMs).toBeGreaterThan(0);
     expect(result.vectorizeAttempts).toBe(2);
   });
 });

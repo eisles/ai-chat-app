@@ -18,6 +18,7 @@ const DEFAULT_VECTOR_TAIL_LIMIT = 20;
 const DEFAULT_TIME_BUDGET_MS = 25_000;
 const MAX_RETRY_ATTEMPTS = 5;
 const MAX_RETRY_DELAY_SECONDS = 60;
+const THROTTLE_RETRY_AFTER_SECONDS = 180;
 const VECTOR_TAIL_STALE_SECONDS = 120;
 const MAX_VECTOR_TAIL_CONCURRENCY = 2;
 const VECTORIZE_TASK_START_INTERVAL_MS = 150;
@@ -48,11 +49,17 @@ type RunTailPayload = {
   limit?: unknown;
   timeBudgetMs?: unknown;
   vectorizeConcurrency?: unknown;
+  autoAdjustVectorizeConcurrency?: unknown;
 };
 
 function parseConcurrencyOverride(value: unknown, fallback: number, max: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return Math.max(1, Math.min(max, Math.floor(value)));
+}
+
+function parseBooleanFlag(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") return value;
+  return fallback;
 }
 
 function lowerConcurrencyOn429(current: number, errorCode: string): number {
@@ -126,6 +133,42 @@ function calcRetryAfterSeconds(attemptCount: number): number {
   return Math.max(1, Math.floor(seconds));
 }
 
+function calcThrottleRetryAfterSeconds(attemptCount: number): number {
+  return Math.max(THROTTLE_RETRY_AFTER_SECONDS, calcRetryAfterSeconds(attemptCount));
+}
+
+function buildRetryPlan(options: {
+  retryable: boolean;
+  errorCode: string;
+  attemptCount: number;
+}) {
+  if (!options.retryable) {
+    return {
+      shouldRetry: false,
+      retryAfterSeconds: undefined,
+    };
+  }
+
+  if (options.attemptCount < MAX_RETRY_ATTEMPTS) {
+    return {
+      shouldRetry: true,
+      retryAfterSeconds: calcRetryAfterSeconds(options.attemptCount),
+    };
+  }
+
+  if (options.errorCode === "http_429") {
+    return {
+      shouldRetry: true,
+      retryAfterSeconds: calcThrottleRetryAfterSeconds(options.attemptCount),
+    };
+  }
+
+  return {
+    shouldRetry: false,
+    retryAfterSeconds: undefined,
+  };
+}
+
 async function runWithConcurrency<T>(
   tasks: Array<() => Promise<T>>,
   concurrency: number,
@@ -186,6 +229,10 @@ export async function POST(req: Request) {
       VECTOR_TAIL_CONCURRENCY,
       MAX_VECTOR_TAIL_CONCURRENCY
     );
+    const autoAdjustVectorizeConcurrency = parseBooleanFlag(
+      payload.autoAdjustVectorizeConcurrency,
+      true
+    );
     const limit = parseLimit(payload.limit);
     const timeBudgetMs = parseTimeBudgetMs(payload.timeBudgetMs);
     const deadline = Date.now() + timeBudgetMs;
@@ -232,24 +279,25 @@ export async function POST(req: Request) {
               error instanceof Error ? error.message : String(error)
             );
             const classified = classifyRetry(error);
+            const retryPlan = buildRetryPlan({
+              retryable: classified.retryable,
+              errorCode: classified.errorCode,
+              attemptCount: item.attemptCount,
+            });
             if (classified.errorCode === "http_429") {
               http429Count += 1;
               batchSaw429 = true;
             }
-            const retryable =
-              classified.retryable && item.attemptCount < MAX_RETRY_ATTEMPTS;
 
             await markVectorizeTailItemFailure({
               id: item.id,
-              retryable,
+              retryable: retryPlan.shouldRetry,
               error: message,
               errorCode: classified.errorCode,
-              retryAfterSeconds: retryable
-                ? calcRetryAfterSeconds(item.attemptCount)
-                : undefined,
+              retryAfterSeconds: retryPlan.retryAfterSeconds,
             });
 
-            if (retryable) {
+            if (retryPlan.shouldRetry) {
               retried += 1;
               return;
             }
@@ -262,10 +310,12 @@ export async function POST(req: Request) {
       );
 
       if (batchSaw429) {
-        currentVectorizeConcurrency = lowerConcurrencyOn429(
-          currentVectorizeConcurrency,
-          "http_429"
-        );
+        if (autoAdjustVectorizeConcurrency) {
+          currentVectorizeConcurrency = lowerConcurrencyOn429(
+            currentVectorizeConcurrency,
+            "http_429"
+          );
+        }
       }
     }
 

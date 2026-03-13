@@ -121,6 +121,7 @@ describe("POST /api/product-json-import-v2/run", () => {
       reusedFrom: null,
       downloadDurationMs: 3,
       apiDurationMs: 7,
+      retryWaitDurationMs: 0,
     });
     upsertProductImagesVectorize.mockResolvedValue(undefined);
     enqueueVectorizeTailItems.mockResolvedValue(3);
@@ -402,6 +403,98 @@ describe("POST /api/product-json-import-v2/run", () => {
     expect(json.effectiveVectorizeConcurrency).toBe(1);
   });
 
+  it("does not auto-lower vectorize concurrency when auto adjustment is disabled", async () => {
+    const pendingItem = {
+      id: "item-429-no-auto",
+      row_index: 5,
+      city_code: "01101",
+      product_id: "p-429-no-auto",
+      product_json: createProductJson(1),
+      attempt_count: 1,
+    };
+
+    getImportJobV2
+      .mockResolvedValueOnce(createVectorJob())
+      .mockResolvedValueOnce({ ...createVectorJob({ status: "running" }), processedCount: 0 });
+    claimPendingItemsV2
+      .mockResolvedValueOnce([pendingItem])
+      .mockResolvedValueOnce([]);
+    embedOrReuseImageEmbedding.mockRejectedValue(new Error("Vectorize API failed: 429 throttled"));
+
+    const req = new Request("http://localhost/api/product-json-import-v2/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId: "job-1",
+        limit: 1,
+        timeBudgetMs: 10_000,
+        vectorizeConcurrency: 2,
+        autoAdjustVectorizeConcurrency: false,
+        debugTimings: true,
+      }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(json.http429Count).toBe(1);
+    expect(json.effectiveVectorizeConcurrency).toBe(2);
+    expect(json.itemReports?.[0]?.steps.map((step: { step: string }) => step.step)).not.toContain(
+      "vectorize_concurrency_downgraded"
+    );
+  });
+
+  it("keeps retrying vectorize 429 failures even after the normal retry cap", async () => {
+    const pendingItem = {
+      id: "item-429-max",
+      row_index: 6,
+      city_code: "01101",
+      product_id: "p-429-max",
+      product_json: createProductJson(1),
+      attempt_count: 5,
+    };
+
+    getImportJobV2
+      .mockResolvedValueOnce(createVectorJob())
+      .mockResolvedValueOnce({ ...createVectorJob({ status: "running" }), processedCount: 0 });
+    claimPendingItemsV2
+      .mockResolvedValueOnce([pendingItem])
+      .mockResolvedValueOnce([]);
+    embedOrReuseImageEmbedding.mockRejectedValue(new Error("Vectorize API failed: 429 throttled"));
+
+    const req = new Request("http://localhost/api/product-json-import-v2/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId: "job-1",
+        limit: 1,
+        timeBudgetMs: 10_000,
+        debugTimings: true,
+      }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(markItemRetryV2).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemId: "item-429-max",
+        jobId: "job-1",
+        errorCode: "http_429",
+        retryAfterSeconds: 180,
+      })
+    );
+    expect(markItemFailureV2).not.toHaveBeenCalled();
+    expect(json.retried).toBe(1);
+    expect(json.itemReports?.[0]?.steps.map((step: { step: string }) => step.step)).toContain(
+      "retry_extended_after_throttle_cap"
+    );
+  });
+
   it("processes all images in the initial run when maxVectorizeHeadImages covers them", async () => {
     const pendingItem = {
       id: "item-3",
@@ -452,6 +545,7 @@ describe("POST /api/product-json-import-v2/run", () => {
       })
     );
     const stepNames = json.itemReports?.[0]?.steps.map((step: { step: string }) => step.step);
+    expect(stepNames).toContain("vectorize_main_queue_wait");
     expect(stepNames).toContain("vectorize_main_download");
     expect(stepNames).toContain("vectorize_main_api");
     expect(stepNames).toContain("enqueue_vectorize_tail_empty");

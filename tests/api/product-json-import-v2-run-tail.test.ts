@@ -72,6 +72,7 @@ describe("POST /api/product-json-import-v2/run-tail", () => {
       model: "vectorize-test",
       dim: 2,
       normalized: true,
+      retryWaitDurationMs: 0,
     });
   });
 
@@ -232,6 +233,97 @@ describe("POST /api/product-json-import-v2/run-tail", () => {
     expect(json.failed).toBe(0);
     expect(json.http429Count).toBe(1);
     expect(json.effectiveVectorizeConcurrency).toBe(1);
+  });
+
+  it("does not auto-lower tail vectorize concurrency when auto adjustment is disabled", async () => {
+    claimPendingVectorizeTailItems
+      .mockResolvedValueOnce([
+        {
+          id: "tail-429-no-auto",
+          jobId: "job-1",
+          importItemId: "item-1",
+          productId: "p-1",
+          cityCode: "01101",
+          imageUrl: "https://example.com/slide-11.jpg",
+          slideIndex: 11,
+          status: "processing",
+          attemptCount: 1,
+          nextRetryAt: null,
+          error: null,
+          errorCode: null,
+          processingStartedAt: "2026-03-13T09:00:00.000Z",
+          createdAt: "2026-03-13T08:59:00.000Z",
+          updatedAt: "2026-03-13T09:00:00.000Z",
+        },
+      ])
+      .mockResolvedValueOnce([]);
+    embedOrReuseImageEmbedding.mockRejectedValue(new Error("Vectorize API failed: 429 throttled"));
+
+    const req = new Request("http://localhost/api/product-json-import-v2/run-tail", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId: "job-1",
+        limit: 10,
+        vectorizeConcurrency: 2,
+        autoAdjustVectorizeConcurrency: false,
+      }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(json.http429Count).toBe(1);
+    expect(json.effectiveVectorizeConcurrency).toBe(2);
+  });
+
+  it("keeps retrying tail 429 failures even after the normal retry cap", async () => {
+    claimPendingVectorizeTailItems
+      .mockResolvedValueOnce([
+        {
+          id: "tail-429-max",
+          jobId: "job-1",
+          importItemId: "item-1",
+          productId: "p-1",
+          cityCode: "01101",
+          imageUrl: "https://example.com/slide-10.jpg",
+          slideIndex: 10,
+          status: "processing",
+          attemptCount: 5,
+          nextRetryAt: null,
+          error: null,
+          errorCode: null,
+          processingStartedAt: "2026-03-13T09:00:00.000Z",
+          createdAt: "2026-03-13T08:59:00.000Z",
+          updatedAt: "2026-03-13T09:00:00.000Z",
+        },
+      ])
+      .mockResolvedValueOnce([]);
+    embedOrReuseImageEmbedding.mockRejectedValue(new Error("Vectorize API failed: 429 throttled"));
+
+    const req = new Request("http://localhost/api/product-json-import-v2/run-tail", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId: "job-1", limit: 10 }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(markVectorizeTailItemFailure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "tail-429-max",
+        retryable: true,
+        errorCode: "http_429",
+        retryAfterSeconds: 180,
+      })
+    );
+    expect(json.retried).toBe(1);
+    expect(json.failed).toBe(0);
   });
 
   it("loops over multiple tail batches within one request", async () => {

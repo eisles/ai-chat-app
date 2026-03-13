@@ -275,6 +275,8 @@ export default function ProductJsonImportV2Page() {
   const [captionConcurrency, setCaptionConcurrency] = useState("4");
   const [vectorizeConcurrency, setVectorizeConcurrency] = useState("2");
   const [maxTotalVectorizeInFlight, setMaxTotalVectorizeInFlight] = useState("5");
+  const [autoAdjustVectorizeConcurrency, setAutoAdjustVectorizeConcurrency] =
+    useState(true);
   const [debugTimings, setDebugTimings] = useState(true);
   const [lastRun, setLastRun] = useState<RunResponse | null>(null);
 
@@ -390,6 +392,10 @@ export default function ProductJsonImportV2Page() {
     effectiveVectorizeConcurrency: number | null | undefined
   ) => {
     const current = parseVectorizeConcurrencyValue(vectorizeConcurrency);
+    if (!autoAdjustVectorizeConcurrency) {
+      vectorizeConcurrencyRecoveryStreakRef.current = 0;
+      return current;
+    }
     const effective =
       typeof effectiveVectorizeConcurrency === "number"
         ? Math.max(1, Math.min(MAX_VECTORIZE_CONCURRENCY, effectiveVectorizeConcurrency))
@@ -537,6 +543,7 @@ export default function ProductJsonImportV2Page() {
         vectorizeConcurrency: parseInt(vectorizeConcurrency, 10) || 2,
         maxTotalVectorizeInFlight: parseInt(maxTotalVectorizeInFlight, 10) || 5,
         maxVectorizeHeadImages: parseInt(maxVectorizeHeadImages, 10) || 4,
+        autoAdjustVectorizeConcurrency,
       }),
     });
     const data = await readJsonResponse<RunResponse>(res);
@@ -1059,6 +1066,7 @@ export default function ProductJsonImportV2Page() {
           timeBudgetMs: parseInt(timeBudgetMs, 10) || 25_000,
           vectorizeConcurrency:
             effectiveVectorizeConcurrency ?? (parseInt(vectorizeConcurrency, 10) || 2),
+          autoAdjustVectorizeConcurrency,
         }),
       });
       const data = await readJsonResponse<RunTailResponse>(res);
@@ -1809,7 +1817,7 @@ export default function ProductJsonImportV2Page() {
                 vectorize並列
               </label>
               <div className="text-[11px] text-muted-foreground">
-                画像ベクトル化の並列数。1-8 で指定できます。429 が出ると自動で下げ、3回連続で出なければ1段戻します。
+                画像ベクトル化の並列数。1-8 で指定できます。自動調整ONなら 429 が出ると下げ、3回連続で出なければ1段戻します。
               </div>
               <input
                 id="vectorizeConcurrency"
@@ -1822,6 +1830,20 @@ export default function ProductJsonImportV2Page() {
                 disabled={!job.doImageVectors}
               />
             </div>
+            <label className="flex items-center gap-2 pb-1">
+              <input
+                type="checkbox"
+                checked={autoAdjustVectorizeConcurrency}
+                onChange={(e) => {
+                  setAutoAdjustVectorizeConcurrency(e.target.checked);
+                  vectorizeConcurrencyRecoveryStreakRef.current = 0;
+                }}
+                disabled={!job.doImageVectors}
+              />
+              <span className="text-xs text-muted-foreground">
+                vectorize並列を自動調整する
+              </span>
+            </label>
             <label className="flex items-center gap-2 pb-1">
               <input
                 type="checkbox"

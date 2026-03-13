@@ -10,6 +10,7 @@ export type ImageVector = {
   normalized: boolean | null;
   downloadDurationMs?: number | null;
   apiDurationMs?: number | null;
+  retryWaitDurationMs?: number | null;
   vectorizeAttempts?: number | null;
 };
 
@@ -106,6 +107,7 @@ export async function embedWithVectorizeApi(imageUrl: string) {
   const downloadDurationMs = Date.now() - downloadStartedAt;
   const startedAt = Date.now();
   let apiDurationMs = 0;
+  let retryWaitDurationMs = 0;
 
   for (let attempt = 1; attempt <= VECTORIZE_SHORT_RETRY_ATTEMPTS; attempt += 1) {
     const formData = new FormData();
@@ -127,7 +129,9 @@ export async function embedWithVectorizeApi(imageUrl: string) {
         (status === 429 || (status >= 500 && status <= 599)) &&
         attempt < VECTORIZE_SHORT_RETRY_ATTEMPTS;
       if (retryable) {
-        await sleep(calcShortRetryDelayMs(attempt, retryAfterMs));
+        const delayMs = calcShortRetryDelayMs(attempt, retryAfterMs);
+        retryWaitDurationMs += delayMs;
+        await sleep(delayMs);
         continue;
       }
       throw new Error(`Vectorize API failed: ${status} ${body}`);
@@ -165,6 +169,7 @@ export async function embedWithVectorizeApi(imageUrl: string) {
       normalized: json?.normalized ?? null,
       downloadDurationMs,
       apiDurationMs,
+      retryWaitDurationMs,
       vectorizeAttempts: attempt,
     };
   }

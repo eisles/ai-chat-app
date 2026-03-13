@@ -45,6 +45,7 @@ const DEFAULT_HEAVY_ITEM_CONCURRENCY = 2;
 const MAX_HEAVY_ITEM_CONCURRENCY = 4;
 const MAX_RETRY_ATTEMPTS = 5;
 const MAX_RETRY_DELAY_SECONDS = 60;
+const THROTTLE_RETRY_AFTER_SECONDS = 180;
 const STALE_PROCESSING_SECONDS = 120;
 const HEAVY_WORK_MIN_REMAINING_MS = 6000;
 const VECTORIZE_TASK_START_INTERVAL_MS = 150;
@@ -106,6 +107,7 @@ type RunPayload = {
   heavyItemConcurrency?: unknown;
   maxVectorizeHeadImages?: unknown;
   maxTotalVectorizeInFlight?: unknown;
+  autoAdjustVectorizeConcurrency?: unknown;
   debugTimings?: unknown;
   textConcurrency?: unknown;
   captionConcurrency?: unknown;
@@ -146,6 +148,11 @@ function parseMaxVectorizeHeadImages(value: unknown) {
 
 function parseDebugTimings(value: unknown): boolean {
   return value === true;
+}
+
+function parseBooleanFlag(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") return value;
+  return fallback;
 }
 
 function parseConcurrencyOverride(
@@ -595,9 +602,18 @@ async function processProductItem(options: {
             : `vectorize_slide_${item.slideIndex}`;
 
         await timeStep(stepName, async () => {
-          const embedding = await options.vectorizeSemaphore.use(() =>
-            embedOrReuseImageEmbedding(item.imageUrl)
-          );
+          let queueWaitMs = 0;
+          const queueStartedAt = Date.now();
+          const embedding = await options.vectorizeSemaphore.use(() => {
+            queueWaitMs = Date.now() - queueStartedAt;
+            return embedOrReuseImageEmbedding(item.imageUrl);
+          });
+          if (options.debugTimings) {
+            steps.push({
+              step: `${stepName}_queue_wait`,
+              ms: queueWaitMs,
+            });
+          }
           if (options.debugTimings && embedding.source === "vectorize_api") {
             if (typeof embedding.downloadDurationMs === "number") {
               steps.push({
@@ -609,6 +625,15 @@ async function processProductItem(options: {
               steps.push({
                 step: `${stepName}_api`,
                 ms: embedding.apiDurationMs,
+              });
+            }
+            if (
+              typeof embedding.retryWaitDurationMs === "number" &&
+              embedding.retryWaitDurationMs > 0
+            ) {
+              steps.push({
+                step: `${stepName}_retry_wait`,
+                ms: embedding.retryWaitDurationMs,
               });
             }
           }
@@ -706,6 +731,46 @@ function calcRetryAfterSeconds(attemptCount: number) {
   return Math.max(1, Math.floor(seconds));
 }
 
+function calcThrottleRetryAfterSeconds(attemptCount: number) {
+  return Math.max(THROTTLE_RETRY_AFTER_SECONDS, calcRetryAfterSeconds(attemptCount));
+}
+
+function buildRetryPlan(options: {
+  retryable: boolean;
+  errorCode: string;
+  attemptCount: number;
+}) {
+  if (!options.retryable) {
+    return {
+      shouldRetry: false,
+      retryAfterSeconds: null,
+      prolongedThrottleBackoff: false,
+    };
+  }
+
+  if (options.attemptCount < MAX_RETRY_ATTEMPTS) {
+    return {
+      shouldRetry: true,
+      retryAfterSeconds: calcRetryAfterSeconds(options.attemptCount),
+      prolongedThrottleBackoff: false,
+    };
+  }
+
+  if (options.errorCode === "http_429") {
+    return {
+      shouldRetry: true,
+      retryAfterSeconds: calcThrottleRetryAfterSeconds(options.attemptCount),
+      prolongedThrottleBackoff: true,
+    };
+  }
+
+  return {
+    shouldRetry: false,
+    retryAfterSeconds: null,
+    prolongedThrottleBackoff: false,
+  };
+}
+
 function errorResponse(error: unknown) {
   if (error instanceof ApiError) {
     return Response.json({ ok: false, error: error.message }, { status: error.status });
@@ -722,6 +787,10 @@ export async function POST(req: Request) {
       throw new ApiError("jobIdが必要です", 400);
     }
     const debugTimings = parseDebugTimings(payload.debugTimings);
+    const autoAdjustVectorizeConcurrency = parseBooleanFlag(
+      payload.autoAdjustVectorizeConcurrency,
+      true
+    );
     const maxVectorizeHeadImages = parseMaxVectorizeHeadImages(
       payload.maxVectorizeHeadImages
     );
@@ -952,25 +1021,31 @@ export async function POST(req: Request) {
               error instanceof Error ? error.message : "Unknown error"
             );
             const { retryable, errorCode } = classifyRetry(error);
+            const retryPlan = buildRetryPlan({
+              retryable,
+              errorCode,
+              attemptCount: item.attempt_count,
+            });
             const previousVectorizeConcurrency = currentVectorizeConcurrency;
             if (errorCode === "http_429") {
               http429Count += 1;
-              currentVectorizeConcurrency = lowerConcurrencyOn429(
-                currentVectorizeConcurrency,
-                errorCode
-              );
+              if (autoAdjustVectorizeConcurrency) {
+                currentVectorizeConcurrency = lowerConcurrencyOn429(
+                  currentVectorizeConcurrency,
+                  errorCode
+                );
+              }
             }
             const downgraded =
               currentVectorizeConcurrency < previousVectorizeConcurrency;
 
-            if (retryable && item.attempt_count < MAX_RETRY_ATTEMPTS) {
-              const retryAfterSeconds = calcRetryAfterSeconds(item.attempt_count);
+            if (retryPlan.shouldRetry && retryPlan.retryAfterSeconds !== null) {
               await markItemRetryV2({
                 itemId: item.id,
                 jobId,
                 error: message,
                 errorCode,
-                retryAfterSeconds,
+                retryAfterSeconds: retryPlan.retryAfterSeconds,
               });
               retried += 1;
               if (debugTimings) {
@@ -985,11 +1060,14 @@ export async function POST(req: Request) {
                     ...(downgraded
                       ? [{ step: "vectorize_concurrency_downgraded", ms: 0 }]
                       : []),
+                    ...(retryPlan.prolongedThrottleBackoff
+                      ? [{ step: "retry_extended_after_throttle_cap", ms: 0 }]
+                      : []),
                     { step: "retry_scheduled", ms: 0 },
                   ],
                   error: message,
                   errorCode,
-                  retryAfterSeconds,
+                  retryAfterSeconds: retryPlan.retryAfterSeconds,
                 });
               }
               return;
@@ -1136,25 +1214,31 @@ export async function POST(req: Request) {
                 error instanceof Error ? error.message : "Unknown error"
               );
               const { retryable, errorCode } = classifyRetry(error);
+              const retryPlan = buildRetryPlan({
+                retryable,
+                errorCode,
+                attemptCount: item.attempt_count,
+              });
               const previousVectorizeConcurrency = currentVectorizeConcurrency;
               if (errorCode === "http_429") {
                 http429Count += 1;
-                currentVectorizeConcurrency = lowerConcurrencyOn429(
-                  currentVectorizeConcurrency,
-                  errorCode
-                );
+                if (autoAdjustVectorizeConcurrency) {
+                  currentVectorizeConcurrency = lowerConcurrencyOn429(
+                    currentVectorizeConcurrency,
+                    errorCode
+                  );
+                }
               }
               const downgraded =
                 currentVectorizeConcurrency < previousVectorizeConcurrency;
 
-              if (retryable && item.attempt_count < MAX_RETRY_ATTEMPTS) {
-                const retryAfterSeconds = calcRetryAfterSeconds(item.attempt_count);
+              if (retryPlan.shouldRetry && retryPlan.retryAfterSeconds !== null) {
                 await markItemRetryV2({
                   itemId: item.id,
                   jobId,
                   error: message,
                   errorCode,
-                  retryAfterSeconds,
+                  retryAfterSeconds: retryPlan.retryAfterSeconds,
                 });
                 retried += 1;
                 if (debugTimings) {
@@ -1169,11 +1253,14 @@ export async function POST(req: Request) {
                       ...(downgraded
                         ? [{ step: "vectorize_concurrency_downgraded", ms: 0 }]
                         : []),
+                      ...(retryPlan.prolongedThrottleBackoff
+                        ? [{ step: "retry_extended_after_throttle_cap", ms: 0 }]
+                        : []),
                       { step: "retry_scheduled", ms: 0 },
                     ],
                     error: message,
                     errorCode,
-                    retryAfterSeconds,
+                    retryAfterSeconds: retryPlan.retryAfterSeconds,
                   });
                 }
                 return;
