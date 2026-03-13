@@ -195,6 +195,8 @@ const UPLOAD_MAX_ROWS = 200;
 const UPLOAD_MAX_BYTES = 1_000_000;
 const UPLOAD_STATE_KEY = "product-json-import-v2-upload";
 const MAX_TAIL_RUN_REQUESTS = 20;
+const MAX_VECTORIZE_CONCURRENCY = 8;
+const VECTORIZE_CONCURRENCY_RECOVERY_RUNS = 3;
 
 type CsvRow = Record<string, string>;
 
@@ -303,6 +305,8 @@ export default function ProductJsonImportV2Page() {
   >([]);
   const [resumeState, setResumeState] = useState<UploadResumeState | null>(null);
   const isTicking = useRef(false);
+  const vectorizeConcurrencyCapRef = useRef(2);
+  const vectorizeConcurrencyRecoveryStreakRef = useRef(0);
   const [consecutiveRunErrors, setConsecutiveRunErrors] = useState(0);
   const MAX_CONSECUTIVE_RUN_ERRORS = 3;
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -365,6 +369,62 @@ export default function ProductJsonImportV2Page() {
       return;
     }
     window.localStorage.setItem(UPLOAD_STATE_KEY, JSON.stringify(next));
+  };
+
+  const parseVectorizeConcurrencyValue = (value: string) => {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return 2;
+    return Math.max(1, Math.min(MAX_VECTORIZE_CONCURRENCY, parsed));
+  };
+
+  const applyManualVectorizeConcurrency = (value: string) => {
+    setVectorizeConcurrency(value);
+    vectorizeConcurrencyCapRef.current = parseVectorizeConcurrencyValue(value);
+    vectorizeConcurrencyRecoveryStreakRef.current = 0;
+  };
+
+  const applyAdaptiveVectorizeConcurrency = (
+    http429Count: number | undefined,
+    effectiveVectorizeConcurrency: number | null | undefined
+  ) => {
+    const current = parseVectorizeConcurrencyValue(vectorizeConcurrency);
+    const effective =
+      typeof effectiveVectorizeConcurrency === "number"
+        ? Math.max(1, Math.min(MAX_VECTORIZE_CONCURRENCY, effectiveVectorizeConcurrency))
+        : current;
+
+    if ((http429Count ?? 0) > 0) {
+      vectorizeConcurrencyRecoveryStreakRef.current = 0;
+      if (effective !== current) {
+        setVectorizeConcurrency(String(effective));
+      }
+      return effective;
+    }
+
+    if (effective >= vectorizeConcurrencyCapRef.current) {
+      vectorizeConcurrencyRecoveryStreakRef.current = 0;
+      if (effective !== current) {
+        setVectorizeConcurrency(String(effective));
+      }
+      return effective;
+    }
+
+    vectorizeConcurrencyRecoveryStreakRef.current += 1;
+    if (
+      vectorizeConcurrencyRecoveryStreakRef.current >= VECTORIZE_CONCURRENCY_RECOVERY_RUNS
+    ) {
+      const recovered = Math.min(vectorizeConcurrencyCapRef.current, effective + 1);
+      vectorizeConcurrencyRecoveryStreakRef.current = 0;
+      if (recovered !== current) {
+        setVectorizeConcurrency(String(recovered));
+      }
+      return recovered;
+    }
+
+    if (effective !== current) {
+      setVectorizeConcurrency(String(effective));
+    }
+    return effective;
   };
 
   async function fetchStatus(jobId: string) {
@@ -480,11 +540,11 @@ export default function ProductJsonImportV2Page() {
       throw new Error(data.error ?? "バッチ処理に失敗しました");
     }
     setLastRun(data);
-    if (
-      typeof data.effectiveVectorizeConcurrency === "number" &&
-      data.effectiveVectorizeConcurrency < (parseInt(vectorizeConcurrency, 10) || 2)
-    ) {
-      setVectorizeConcurrency(String(data.effectiveVectorizeConcurrency));
+    if (job?.doImageVectors) {
+      applyAdaptiveVectorizeConcurrency(
+        data.http429Count,
+        data.effectiveVectorizeConcurrency ?? null
+      );
     }
     if (data.job) {
       setJob(data.job);
@@ -895,17 +955,22 @@ export default function ProductJsonImportV2Page() {
     }
   }
 
-  async function handleRequeueJob(target: Job) {
+  async function handleRequeueJob(
+    target: Job,
+    statusesOverride?: Array<"failed" | "skipped" | "success">
+  ) {
     const selection = jobActions[target.id] ?? {
       failed: true,
       skipped: false,
       success: false,
     };
-    const statuses = [
-      selection.failed ? "failed" : null,
-      selection.skipped ? "skipped" : null,
-      selection.success ? "success" : null,
-    ].filter((value): value is "failed" | "skipped" | "success" => Boolean(value));
+    const statuses =
+      statusesOverride ??
+      [
+        selection.failed ? "failed" : null,
+        selection.skipped ? "skipped" : null,
+        selection.success ? "success" : null,
+      ].filter((value): value is "failed" | "skipped" | "success" => Boolean(value));
     if (statuses.length === 0) {
       throw new Error("再処理対象を選択してください");
     }
@@ -1003,13 +1068,10 @@ export default function ProductJsonImportV2Page() {
       totalRetried += data.retried ?? 0;
       totalFailed += data.failed ?? 0;
       totalHttp429 += data.http429Count ?? 0;
-      effectiveVectorizeConcurrency = data.effectiveVectorizeConcurrency ?? null;
-      if (
-        typeof effectiveVectorizeConcurrency === "number" &&
-        effectiveVectorizeConcurrency < (parseInt(vectorizeConcurrency, 10) || 2)
-      ) {
-        setVectorizeConcurrency(String(effectiveVectorizeConcurrency));
-      }
+      effectiveVectorizeConcurrency = applyAdaptiveVectorizeConcurrency(
+        data.http429Count,
+        data.effectiveVectorizeConcurrency ?? null
+      );
       latestTailStats = data.tailStats;
 
       const pendingCount = data.tailStats?.pendingCount ?? 0;
@@ -1701,7 +1763,7 @@ export default function ProductJsonImportV2Page() {
                 vectorize並列
               </label>
               <div className="text-[11px] text-muted-foreground">
-                画像ベクトル化の並列数。1-8 で指定できます。上げすぎると失敗率が上がります。
+                画像ベクトル化の並列数。1-8 で指定できます。429 が出ると自動で下げ、3回連続で出なければ1段戻します。
               </div>
               <input
                 id="vectorizeConcurrency"
@@ -1709,7 +1771,7 @@ export default function ProductJsonImportV2Page() {
                 min="1"
                 max="8"
                 value={vectorizeConcurrency}
-                onChange={(e) => setVectorizeConcurrency(e.target.value)}
+                onChange={(e) => applyManualVectorizeConcurrency(e.target.value)}
                 className="w-20 rounded-md border bg-background px-3 py-2 text-sm"
                 disabled={!job.doImageVectors}
               />
@@ -1744,7 +1806,54 @@ export default function ProductJsonImportV2Page() {
 
           {failedItems.length > 0 && (
             <div className="mt-4 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-              <div className="font-medium">直近の失敗</div>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="font-medium">直近の失敗</div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={!job}
+                    onClick={async () => {
+                      if (!job) return;
+                      try {
+                        await handleRequeueJob(job, ["failed"]);
+                      } catch (actionError) {
+                        setError(
+                          actionError instanceof Error
+                            ? actionError.message
+                            : "failed の再投入に失敗しました"
+                        );
+                      }
+                    }}
+                  >
+                    failed だけ再投入
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={!job || isRunning}
+                    onClick={async () => {
+                      if (!job) return;
+                      try {
+                        await handleRequeueJob(job, ["failed"]);
+                        setIsRunning(true);
+                      } catch (actionError) {
+                        setError(
+                          actionError instanceof Error
+                            ? actionError.message
+                            : "failed の再投入と開始に失敗しました"
+                        );
+                      }
+                    }}
+                  >
+                    failed を再投入して開始
+                  </Button>
+                </div>
+              </div>
+              <div className="mt-1 text-xs text-destructive/80">
+                この一覧は failed 確定した item です。自動 run では再実行されないため、再投入が必要です。
+              </div>
               <div className="mt-2 space-y-1 text-xs">
                 {failedItems.map((item) => (
                   <div key={`${item.row_index}-${item.product_id ?? ""}`}>

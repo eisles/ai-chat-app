@@ -216,6 +216,7 @@ describe("POST /api/product-json-import-v2/run", () => {
         jobId: "job-1",
         limit: 1,
         timeBudgetMs: 10_000,
+        debugTimings: true,
       }),
     });
 

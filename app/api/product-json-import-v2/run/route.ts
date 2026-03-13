@@ -870,6 +870,7 @@ export async function POST(req: Request) {
               error instanceof Error ? error.message : "Unknown error"
             );
             const { retryable, errorCode } = classifyRetry(error);
+            const previousVectorizeConcurrency = currentVectorizeConcurrency;
             if (errorCode === "http_429") {
               http429Count += 1;
               currentVectorizeConcurrency = lowerConcurrencyOn429(
@@ -877,6 +878,8 @@ export async function POST(req: Request) {
                 errorCode
               );
             }
+            const downgraded =
+              currentVectorizeConcurrency < previousVectorizeConcurrency;
 
             if (retryable && item.attempt_count < MAX_RETRY_ATTEMPTS) {
               const retryAfterSeconds = calcRetryAfterSeconds(item.attempt_count);
@@ -896,7 +899,12 @@ export async function POST(req: Request) {
                   cityCode: item.city_code ?? null,
                   outcome: "retry",
                   attemptCount: item.attempt_count,
-                  steps: [{ step: "retry_scheduled", ms: 0 }],
+                  steps: [
+                    ...(downgraded
+                      ? [{ step: "vectorize_concurrency_downgraded", ms: 0 }]
+                      : []),
+                    { step: "retry_scheduled", ms: 0 },
+                  ],
                   error: message,
                   errorCode,
                   retryAfterSeconds,
@@ -921,7 +929,12 @@ export async function POST(req: Request) {
                 cityCode: item.city_code ?? null,
                 outcome: "failed",
                 attemptCount: item.attempt_count,
-                steps: [{ step: "failed", ms: 0 }],
+                steps: [
+                  ...(downgraded
+                    ? [{ step: "vectorize_concurrency_downgraded", ms: 0 }]
+                    : []),
+                  { step: "failed", ms: 0 },
+                ],
                 error: message,
                 errorCode,
               });
@@ -1036,14 +1049,17 @@ export async function POST(req: Request) {
           const message = normalizeErrorMessage(
             error instanceof Error ? error.message : "Unknown error"
           );
-          const { retryable, errorCode } = classifyRetry(error);
-          if (errorCode === "http_429") {
-            http429Count += 1;
-            currentVectorizeConcurrency = lowerConcurrencyOn429(
-              currentVectorizeConcurrency,
-              errorCode
-            );
-          }
+            const { retryable, errorCode } = classifyRetry(error);
+            const previousVectorizeConcurrency = currentVectorizeConcurrency;
+            if (errorCode === "http_429") {
+              http429Count += 1;
+              currentVectorizeConcurrency = lowerConcurrencyOn429(
+                currentVectorizeConcurrency,
+                errorCode
+              );
+            }
+            const downgraded =
+              currentVectorizeConcurrency < previousVectorizeConcurrency;
 
           if (retryable && item.attempt_count < MAX_RETRY_ATTEMPTS) {
             const retryAfterSeconds = calcRetryAfterSeconds(item.attempt_count);
@@ -1063,7 +1079,12 @@ export async function POST(req: Request) {
                 cityCode: item.city_code ?? null,
                 outcome: "retry",
                 attemptCount: item.attempt_count,
-                steps: [{ step: "retry_scheduled", ms: 0 }],
+                steps: [
+                  ...(downgraded
+                    ? [{ step: "vectorize_concurrency_downgraded", ms: 0 }]
+                    : []),
+                  { step: "retry_scheduled", ms: 0 },
+                ],
                 error: message,
                 errorCode,
                 retryAfterSeconds,
@@ -1088,7 +1109,12 @@ export async function POST(req: Request) {
               cityCode: item.city_code ?? null,
               outcome: "failed",
               attemptCount: item.attempt_count,
-              steps: [{ step: "failed", ms: 0 }],
+              steps: [
+                ...(downgraded
+                  ? [{ step: "vectorize_concurrency_downgraded", ms: 0 }]
+                  : []),
+                { step: "failed", ms: 0 },
+              ],
               error: message,
               errorCode,
             });
