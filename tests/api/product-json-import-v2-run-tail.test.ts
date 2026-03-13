@@ -54,6 +54,7 @@ describe("POST /api/product-json-import-v2/run-tail", () => {
     vi.clearAllMocks();
     getImportJobV2.mockResolvedValue(createJob());
     requeueStaleVectorizeTailItems.mockResolvedValue(0);
+    claimPendingVectorizeTailItems.mockResolvedValue([]);
     getVectorizeTailStats.mockResolvedValue({
       pendingCount: 0,
       processingCount: 0,
@@ -75,42 +76,44 @@ describe("POST /api/product-json-import-v2/run-tail", () => {
   });
 
   it("processes only pending tail slides and marks them success", async () => {
-    claimPendingVectorizeTailItems.mockResolvedValue([
-      {
-        id: "tail-1",
-        jobId: "job-1",
-        importItemId: "item-1",
-        productId: "p-1",
-        cityCode: "01101",
-        imageUrl: "https://example.com/slide-4.jpg",
-        slideIndex: 4,
-        status: "processing",
-        attemptCount: 1,
-        nextRetryAt: null,
-        error: null,
-        errorCode: null,
-        processingStartedAt: "2026-03-13T09:00:00.000Z",
-        createdAt: "2026-03-13T08:59:00.000Z",
-        updatedAt: "2026-03-13T09:00:00.000Z",
-      },
-      {
-        id: "tail-2",
-        jobId: "job-1",
-        importItemId: "item-1",
-        productId: "p-1",
-        cityCode: "01101",
-        imageUrl: "https://example.com/slide-5.jpg",
-        slideIndex: 5,
-        status: "processing",
-        attemptCount: 1,
-        nextRetryAt: null,
-        error: null,
-        errorCode: null,
-        processingStartedAt: "2026-03-13T09:00:00.000Z",
-        createdAt: "2026-03-13T08:59:00.000Z",
-        updatedAt: "2026-03-13T09:00:00.000Z",
-      },
-    ]);
+    claimPendingVectorizeTailItems
+      .mockResolvedValueOnce([
+        {
+          id: "tail-1",
+          jobId: "job-1",
+          importItemId: "item-1",
+          productId: "p-1",
+          cityCode: "01101",
+          imageUrl: "https://example.com/slide-4.jpg",
+          slideIndex: 4,
+          status: "processing",
+          attemptCount: 1,
+          nextRetryAt: null,
+          error: null,
+          errorCode: null,
+          processingStartedAt: "2026-03-13T09:00:00.000Z",
+          createdAt: "2026-03-13T08:59:00.000Z",
+          updatedAt: "2026-03-13T09:00:00.000Z",
+        },
+        {
+          id: "tail-2",
+          jobId: "job-1",
+          importItemId: "item-1",
+          productId: "p-1",
+          cityCode: "01101",
+          imageUrl: "https://example.com/slide-5.jpg",
+          slideIndex: 5,
+          status: "processing",
+          attemptCount: 1,
+          nextRetryAt: null,
+          error: null,
+          errorCode: null,
+          processingStartedAt: "2026-03-13T09:00:00.000Z",
+          createdAt: "2026-03-13T08:59:00.000Z",
+          updatedAt: "2026-03-13T09:00:00.000Z",
+        },
+      ])
+      .mockResolvedValueOnce([]);
 
     const req = new Request("http://localhost/api/product-json-import-v2/run-tail", {
       method: "POST",
@@ -134,25 +137,27 @@ describe("POST /api/product-json-import-v2/run-tail", () => {
   });
 
   it("retries retryable tail failures without rolling back import item success", async () => {
-    claimPendingVectorizeTailItems.mockResolvedValue([
-      {
-        id: "tail-3",
-        jobId: "job-1",
-        importItemId: "item-1",
-        productId: "p-1",
-        cityCode: "01101",
-        imageUrl: "https://example.com/slide-6.jpg",
-        slideIndex: 6,
-        status: "processing",
-        attemptCount: 1,
-        nextRetryAt: null,
-        error: null,
-        errorCode: null,
-        processingStartedAt: "2026-03-13T09:00:00.000Z",
-        createdAt: "2026-03-13T08:59:00.000Z",
-        updatedAt: "2026-03-13T09:00:00.000Z",
-      },
-    ]);
+    claimPendingVectorizeTailItems
+      .mockResolvedValueOnce([
+        {
+          id: "tail-3",
+          jobId: "job-1",
+          importItemId: "item-1",
+          productId: "p-1",
+          cityCode: "01101",
+          imageUrl: "https://example.com/slide-6.jpg",
+          slideIndex: 6,
+          status: "processing",
+          attemptCount: 1,
+          nextRetryAt: null,
+          error: null,
+          errorCode: null,
+          processingStartedAt: "2026-03-13T09:00:00.000Z",
+          createdAt: "2026-03-13T08:59:00.000Z",
+          updatedAt: "2026-03-13T09:00:00.000Z",
+        },
+      ])
+      .mockResolvedValueOnce([]);
     embedOrReuseImageEmbedding.mockRejectedValue(new TypeError("network down"));
 
     const req = new Request("http://localhost/api/product-json-import-v2/run-tail", {
@@ -178,5 +183,110 @@ describe("POST /api/product-json-import-v2/run-tail", () => {
     expect(json.success).toBe(0);
     expect(json.retried).toBe(1);
     expect(json.failed).toBe(0);
+  });
+
+  it("treats vectorize 429 failures as retryable for tail backlog items", async () => {
+    claimPendingVectorizeTailItems
+      .mockResolvedValueOnce([
+        {
+          id: "tail-429",
+          jobId: "job-1",
+          importItemId: "item-1",
+          productId: "p-1",
+          cityCode: "01101",
+          imageUrl: "https://example.com/slide-9.jpg",
+          slideIndex: 9,
+          status: "processing",
+          attemptCount: 1,
+          nextRetryAt: null,
+          error: null,
+          errorCode: null,
+          processingStartedAt: "2026-03-13T09:00:00.000Z",
+          createdAt: "2026-03-13T08:59:00.000Z",
+          updatedAt: "2026-03-13T09:00:00.000Z",
+        },
+      ])
+      .mockResolvedValueOnce([]);
+    embedOrReuseImageEmbedding.mockRejectedValue(new Error("Vectorize API failed: 429 throttled"));
+
+    const req = new Request("http://localhost/api/product-json-import-v2/run-tail", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId: "job-1", limit: 10 }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(markVectorizeTailItemFailure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "tail-429",
+        retryable: true,
+        errorCode: "http_429",
+      })
+    );
+    expect(markItemFailureV2).not.toHaveBeenCalled();
+    expect(json.retried).toBe(1);
+    expect(json.failed).toBe(0);
+  });
+
+  it("loops over multiple tail batches within one request", async () => {
+    claimPendingVectorizeTailItems
+      .mockResolvedValueOnce([
+        {
+          id: "tail-4",
+          jobId: "job-1",
+          importItemId: "item-1",
+          productId: "p-1",
+          cityCode: "01101",
+          imageUrl: "https://example.com/slide-7.jpg",
+          slideIndex: 7,
+          status: "processing",
+          attemptCount: 1,
+          nextRetryAt: null,
+          error: null,
+          errorCode: null,
+          processingStartedAt: "2026-03-13T09:00:00.000Z",
+          createdAt: "2026-03-13T08:59:00.000Z",
+          updatedAt: "2026-03-13T09:00:00.000Z",
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: "tail-5",
+          jobId: "job-1",
+          importItemId: "item-1",
+          productId: "p-1",
+          cityCode: "01101",
+          imageUrl: "https://example.com/slide-8.jpg",
+          slideIndex: 8,
+          status: "processing",
+          attemptCount: 1,
+          nextRetryAt: null,
+          error: null,
+          errorCode: null,
+          processingStartedAt: "2026-03-13T09:00:00.000Z",
+          createdAt: "2026-03-13T08:59:00.000Z",
+          updatedAt: "2026-03-13T09:00:00.000Z",
+        },
+      ])
+      .mockResolvedValueOnce([]);
+
+    const req = new Request("http://localhost/api/product-json-import-v2/run-tail", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId: "job-1", limit: 1, timeBudgetMs: 25_000 }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(claimPendingVectorizeTailItems).toHaveBeenCalledTimes(3);
+    expect(json.processed).toBe(2);
+    expect(json.success).toBe(2);
   });
 });

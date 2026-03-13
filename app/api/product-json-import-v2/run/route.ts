@@ -40,11 +40,12 @@ const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 
 const DEFAULT_LIMIT = 5;
 const DEFAULT_TIME_BUDGET_MS = 10_000;
-const MAX_VECTORIZE_HEAD_IMAGES = 4;
+const DEFAULT_MAX_VECTORIZE_HEAD_IMAGES = 4;
 const MAX_RETRY_ATTEMPTS = 5;
 const MAX_RETRY_DELAY_SECONDS = 60;
 const STALE_PROCESSING_SECONDS = 120;
 const HEAVY_WORK_MIN_REMAINING_MS = 6000;
+const HEAVY_JOB_CLAIM_LIMIT = 1;
 
 const CAPTION_TEXT_SOURCES = [
   "image_caption",
@@ -75,10 +76,11 @@ const TEXT_CONCURRENCY = parseConcurrency(
   2,
   6
 );
+const MAX_VECTORIZE_CONCURRENCY = 8;
 const VECTORIZE_CONCURRENCY = parseConcurrency(
   process.env.PRODUCT_IMPORT_V2_VECTORIZE_CONCURRENCY,
   2,
-  4
+  MAX_VECTORIZE_CONCURRENCY
 );
 
 class ApiError extends Error {
@@ -94,6 +96,7 @@ type RunPayload = {
   jobId?: unknown;
   limit?: unknown;
   timeBudgetMs?: unknown;
+  maxVectorizeHeadImages?: unknown;
   debugTimings?: unknown;
   textConcurrency?: unknown;
   captionConcurrency?: unknown;
@@ -112,6 +115,19 @@ function parseTimeBudgetMs(value: unknown) {
     return Math.max(1000, Math.min(25_000, Math.floor(value)));
   }
   return DEFAULT_TIME_BUDGET_MS;
+}
+
+function parseMaxVectorizeHeadImages(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(1, Math.min(9, Math.floor(value)));
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return Math.max(1, Math.min(9, Math.floor(parsed)));
+    }
+  }
+  return DEFAULT_MAX_VECTORIZE_HEAD_IMAGES;
 }
 
 function parseDebugTimings(value: unknown): boolean {
@@ -324,6 +340,7 @@ async function processProductItem(options: {
   captionImageInput: "url" | "data_url";
   captionConcurrency: number;
   vectorizeConcurrency: number;
+  maxVectorizeHeadImages: number;
   knownProductJsonExists?: boolean;
   knownCaptionExists?: boolean;
   debugTimings: boolean;
@@ -512,7 +529,7 @@ async function processProductItem(options: {
     tasks.push(async () => {
       const { head, tail } = splitVectorizeImages({
         images: vectorImages,
-        maxHeadImages: MAX_VECTORIZE_HEAD_IMAGES,
+        maxHeadImages: options.maxVectorizeHeadImages,
       });
       const vectorTasks = head.map((item) => async () => {
         const stepName =
@@ -536,7 +553,9 @@ async function processProductItem(options: {
         await runWithConcurrency(vectorTasks, options.vectorizeConcurrency);
       });
 
-      await timeStep("enqueue_vectorize_tail", async () => {
+      await timeStep(
+        tail.length > 0 ? "enqueue_vectorize_tail" : "enqueue_vectorize_tail_empty",
+        async () => {
         await enqueueVectorizeTailItems({
           jobId: options.jobId,
           importItemId: options.itemId,
@@ -544,7 +563,8 @@ async function processProductItem(options: {
           cityCode: product.city_code ?? null,
           items: tail,
         });
-      });
+        }
+      );
     });
   }
 
@@ -560,13 +580,35 @@ function normalizeErrorMessage(message: string) {
   return trimmed.length > 1000 ? trimmed.slice(0, 1000) : trimmed;
 }
 
+function extractHttpStatus(error: unknown): number | null {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    typeof error.status === "number"
+  ) {
+    return error.status;
+  }
+
+  if (error instanceof Error) {
+    const match = error.message.match(/\b(?:failed|error):\s*(\d{3})\b/i);
+    if (match) {
+      return Number(match[1]);
+    }
+  }
+
+  return null;
+}
+
 function classifyRetry(error: unknown): { retryable: boolean; errorCode: string } {
-  if (error instanceof ApiError) {
-    if (error.status === 429) return { retryable: true, errorCode: "http_429" };
-    if (error.status >= 500 && error.status <= 599) {
+  const httpStatus = error instanceof ApiError ? error.status : extractHttpStatus(error);
+
+  if (httpStatus !== null) {
+    if (httpStatus === 429) return { retryable: true, errorCode: "http_429" };
+    if (httpStatus >= 500 && httpStatus <= 599) {
       return { retryable: true, errorCode: "http_5xx" };
     }
-    return { retryable: false, errorCode: `http_${error.status}` };
+    return { retryable: false, errorCode: `http_${httpStatus}` };
   }
 
   if (error instanceof Error) {
@@ -605,6 +647,9 @@ export async function POST(req: Request) {
       throw new ApiError("jobIdが必要です", 400);
     }
     const debugTimings = parseDebugTimings(payload.debugTimings);
+    const maxVectorizeHeadImages = parseMaxVectorizeHeadImages(
+      payload.maxVectorizeHeadImages
+    );
     const textConcurrency = parseConcurrencyOverride(
       payload.textConcurrency,
       TEXT_CONCURRENCY,
@@ -618,7 +663,7 @@ export async function POST(req: Request) {
     const vectorizeConcurrency = parseConcurrencyOverride(
       payload.vectorizeConcurrency,
       VECTORIZE_CONCURRENCY,
-      4
+      MAX_VECTORIZE_CONCURRENCY
     );
     const job = await getImportJobV2(jobId);
     if (!job) {
@@ -646,9 +691,18 @@ export async function POST(req: Request) {
     let released = 0;
     const itemReports: ItemReport[] = [];
     const isLightJob = job.doTextEmbedding && !job.doImageCaptions && !job.doImageVectors;
+    const claimLimit = isLightJob ? limit : Math.min(limit, HEAVY_JOB_CLAIM_LIMIT);
 
     while (Date.now() <= deadline - 500) {
-      const items = await claimPendingItemsV2(jobId, limit);
+      if (
+        !isLightJob &&
+        processedThisRun > 0 &&
+        Date.now() > deadline - HEAVY_WORK_MIN_REMAINING_MS
+      ) {
+        break;
+      }
+
+      const items = await claimPendingItemsV2(jobId, claimLimit);
       if (items.length === 0) {
         break;
       }
@@ -758,6 +812,7 @@ export async function POST(req: Request) {
               captionImageInput: job.captionImageInput,
               captionConcurrency,
               vectorizeConcurrency,
+              maxVectorizeHeadImages,
               knownProductJsonExists: item.product_id
                 ? existingTextIds.has(item.product_id)
                 : undefined,
@@ -917,6 +972,7 @@ export async function POST(req: Request) {
             captionImageInput: job.captionImageInput,
             captionConcurrency,
             vectorizeConcurrency,
+            maxVectorizeHeadImages,
             knownProductJsonExists: item.product_id
               ? existingTextIds.has(item.product_id)
               : undefined,

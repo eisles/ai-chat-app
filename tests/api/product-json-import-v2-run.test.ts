@@ -98,7 +98,7 @@ function createProductJson(slideCount: number): string {
 
 describe("POST /api/product-json-import-v2/run", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     markJobStartedV2.mockResolvedValue(true);
     requeueStaleProcessingItemsV2.mockResolvedValue(0);
     updateJobStatusV2.mockResolvedValue(undefined);
@@ -231,5 +231,126 @@ describe("POST /api/product-json-import-v2/run", () => {
     });
     expect(embedOrReuseImageEmbedding).toHaveBeenCalled();
     expect(markItemSuccessV2).toHaveBeenCalledWith({ itemId: "item-2", jobId: "job-1" });
+  });
+
+  it("limits heavy jobs to one claimed item even if the requested limit is larger", async () => {
+    getImportJobV2
+      .mockResolvedValueOnce(createVectorJob())
+      .mockResolvedValueOnce(createVectorJob({ status: "running" }));
+    claimPendingItemsV2.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+
+    const req = new Request("http://localhost/api/product-json-import-v2/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId: "job-1",
+        limit: 5,
+        timeBudgetMs: 25_000,
+      }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(claimPendingItemsV2).toHaveBeenCalledWith("job-1", 1);
+  });
+
+  it("retries vectorize 429 failures instead of marking the import item failed", async () => {
+    const pendingItem = {
+      id: "item-429",
+      row_index: 4,
+      city_code: "01101",
+      product_id: "p-429",
+      product_json: createProductJson(1),
+      attempt_count: 1,
+    };
+
+    getImportJobV2
+      .mockResolvedValueOnce(createVectorJob())
+      .mockResolvedValueOnce({ ...createVectorJob({ status: "running" }), processedCount: 0 });
+    claimPendingItemsV2
+      .mockResolvedValueOnce([pendingItem])
+      .mockResolvedValueOnce([]);
+    embedOrReuseImageEmbedding.mockRejectedValue(new Error("Vectorize API failed: 429 throttled"));
+
+    const req = new Request("http://localhost/api/product-json-import-v2/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId: "job-1",
+        limit: 1,
+        timeBudgetMs: 10_000,
+      }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(markItemRetryV2).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemId: "item-429",
+        jobId: "job-1",
+        errorCode: "http_429",
+      })
+    );
+    expect(markItemFailureV2).not.toHaveBeenCalled();
+    expect(json.retried).toBe(1);
+  });
+
+  it("processes all images in the initial run when maxVectorizeHeadImages covers them", async () => {
+    const pendingItem = {
+      id: "item-3",
+      row_index: 4,
+      city_code: "01101",
+      product_id: "p-1",
+      product_json: createProductJson(4),
+      attempt_count: 1,
+    };
+
+    getImportJobV2
+      .mockResolvedValueOnce(createVectorJob())
+      .mockResolvedValueOnce({ ...createVectorJob({ status: "running" }), processedCount: 1 });
+    claimPendingItemsV2.mockResolvedValueOnce([pendingItem]).mockResolvedValueOnce([]);
+
+    const req = new Request("http://localhost/api/product-json-import-v2/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId: "job-1",
+        limit: 1,
+        timeBudgetMs: 10_000,
+        maxVectorizeHeadImages: 9,
+        debugTimings: true,
+      }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(claimPendingItemsV2).toHaveBeenCalledWith("job-1", 1);
+    expect(embedOrReuseImageEmbedding).toHaveBeenCalledTimes(5);
+    expect(
+      embedOrReuseImageEmbedding.mock.calls.map((call) => call[0]).sort()
+    ).toEqual([
+      "https://example.com/main.jpg",
+      "https://example.com/slide-1.jpg",
+      "https://example.com/slide-2.jpg",
+      "https://example.com/slide-3.jpg",
+      "https://example.com/slide-4.jpg",
+    ]);
+    expect(enqueueVectorizeTailItems).toHaveBeenCalledWith(
+      expect.objectContaining({
+        items: [],
+      })
+    );
+    expect(json.itemReports?.[0]?.steps.map((step: { step: string }) => step.step)).toContain(
+      "enqueue_vectorize_tail_empty"
+    );
   });
 });

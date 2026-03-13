@@ -152,6 +152,27 @@ type RunResponse = {
   error?: string;
 };
 
+type RunTailResponse = {
+  ok: boolean;
+  processed?: number;
+  success?: number;
+  retried?: number;
+  failed?: number;
+  timeBudgetMs?: number;
+  tailStats?: JobResponse["tailStats"];
+  error?: string;
+};
+
+type TailRunSummary = {
+  processed: number;
+  success: number;
+  retried: number;
+  failed: number;
+  requests: number;
+  completed: boolean;
+  stoppedReason: string | null;
+};
+
 type CreateJobResponse = {
   ok: boolean;
   jobId?: string;
@@ -167,6 +188,7 @@ type AppendItemsResponse = {
 const UPLOAD_MAX_ROWS = 200;
 const UPLOAD_MAX_BYTES = 1_000_000;
 const UPLOAD_STATE_KEY = "product-json-import-v2-upload";
+const MAX_TAIL_RUN_REQUESTS = 20;
 
 type CsvRow = Record<string, string>;
 
@@ -239,6 +261,7 @@ export default function ProductJsonImportV2Page() {
   const [limit, setLimit] = useState("5");
   const [timeBudgetMs, setTimeBudgetMs] = useState("10000");
   const [avgImageCount, setAvgImageCount] = useState("1");
+  const [maxVectorizeHeadImages, setMaxVectorizeHeadImages] = useState("4");
   const [textConcurrency, setTextConcurrency] = useState("2");
   const [captionConcurrency, setCaptionConcurrency] = useState("4");
   const [vectorizeConcurrency, setVectorizeConcurrency] = useState("2");
@@ -300,6 +323,12 @@ export default function ProductJsonImportV2Page() {
     Record<string, boolean>
   >({});
   const [deletingJobs, setDeletingJobs] = useState<Record<string, boolean>>({});
+  const [runningTailJobs, setRunningTailJobs] = useState<Record<string, boolean>>(
+    {}
+  );
+  const [tailRunResults, setTailRunResults] = useState<
+    Record<string, TailRunSummary | null>
+  >({});
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -437,6 +466,7 @@ export default function ProductJsonImportV2Page() {
         textConcurrency: parseInt(textConcurrency, 10) || 2,
         captionConcurrency: parseInt(captionConcurrency, 10) || 4,
         vectorizeConcurrency: parseInt(vectorizeConcurrency, 10) || 2,
+        maxVectorizeHeadImages: parseInt(maxVectorizeHeadImages, 10) || 4,
       }),
     });
     const data = await readJsonResponse<RunResponse>(res);
@@ -927,6 +957,111 @@ export default function ProductJsonImportV2Page() {
     await fetchJobs();
   }
 
+  async function handleRunTail(target: Job) {
+    let totalProcessed = 0;
+    let totalSuccess = 0;
+    let totalRetried = 0;
+    let totalFailed = 0;
+    let requests = 0;
+    let completed = false;
+    let stoppedReason: string | null = null;
+    let latestTailStats: JobResponse["tailStats"] | undefined;
+
+    while (requests < MAX_TAIL_RUN_REQUESTS) {
+      const res = await fetch("/api/product-json-import-v2/run-tail", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jobId: target.id,
+          timeBudgetMs: parseInt(timeBudgetMs, 10) || 25_000,
+        }),
+      });
+      const data = await readJsonResponse<RunTailResponse>(res);
+      if (!data.ok) {
+        throw new Error(data.error ?? "tail処理に失敗しました");
+      }
+
+      requests += 1;
+      totalProcessed += data.processed ?? 0;
+      totalSuccess += data.success ?? 0;
+      totalRetried += data.retried ?? 0;
+      totalFailed += data.failed ?? 0;
+      latestTailStats = data.tailStats;
+
+      const pendingCount = data.tailStats?.pendingCount ?? 0;
+      const processingCount = data.tailStats?.processingCount ?? 0;
+      const progressed = (data.processed ?? 0) > 0;
+
+      setTailRunResults((prev) => ({
+        ...prev,
+        [target.id]: {
+          processed: totalProcessed,
+          success: totalSuccess,
+          retried: totalRetried,
+          failed: totalFailed,
+          requests,
+          completed: pendingCount === 0 && processingCount === 0,
+          stoppedReason: null,
+        },
+      }));
+
+      if (pendingCount === 0 && processingCount === 0) {
+        completed = true;
+        break;
+      }
+
+      if (!progressed) {
+        stoppedReason = data.tailStats?.nextRetryAt
+          ? "next_retry_at 待ちのため停止"
+          : "進捗がないため停止";
+        break;
+      }
+    }
+
+    if (!completed && !stoppedReason && requests >= MAX_TAIL_RUN_REQUESTS) {
+      stoppedReason = `${MAX_TAIL_RUN_REQUESTS} 回実行したため停止`;
+    }
+
+    if (job?.id === target.id) {
+      await fetchStatus(target.id);
+    }
+    await fetchJobs();
+
+    setTailRunResults((prev) => ({
+      ...prev,
+      [target.id]: {
+        processed: totalProcessed,
+        success: totalSuccess,
+        retried: totalRetried,
+        failed: totalFailed,
+        requests,
+        completed,
+        stoppedReason,
+      },
+    }));
+
+    if (
+      latestTailStats &&
+      !completed &&
+      !stoppedReason &&
+      latestTailStats.pendingCount === 0 &&
+      latestTailStats.processingCount === 0
+    ) {
+      setTailRunResults((prev) => ({
+        ...prev,
+        [target.id]: {
+          processed: totalProcessed,
+          success: totalSuccess,
+          retried: totalRetried,
+          failed: totalFailed,
+          requests,
+          completed: true,
+          stoppedReason: null,
+        },
+      }));
+    }
+  }
+
   const statusLabel = job ? `${job.processedCount}/${job.totalCount}` : "-";
   const progressPercent = job?.totalCount
     ? Math.min(100, Math.round((job.processedCount / job.totalCount) * 100))
@@ -1012,6 +1147,15 @@ export default function ProductJsonImportV2Page() {
     };
     return `${formatDuration(minTotal)}〜${formatDuration(maxTotal)}`;
   })();
+  const currentTailNeedsAction = Boolean(
+    tailStats &&
+      (tailStats.pendingCount > 0 ||
+        tailStats.processingCount > 0 ||
+        tailStats.failedCount > 0)
+  );
+  const currentTailButtonVariant =
+    tailStats?.pendingCount && tailStats.pendingCount > 0 ? "default" : "secondary";
+  const currentTailSummary = tailRunResults[job?.id ?? ""];
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-10 sm:px-6 lg:px-8">
       <div className="space-y-2">
@@ -1268,6 +1412,30 @@ export default function ProductJsonImportV2Page() {
               pending が next_retry_at により待機中です。次回: {formatJst(queueStats.nextRetryAt)}
             </div>
           )}
+          {tailStats && (
+            <div
+              className={`mt-3 rounded-md border px-3 py-2 text-sm ${
+                currentTailNeedsAction
+                  ? "border-primary/40 bg-primary/5 text-foreground"
+                  : "bg-muted/20 text-muted-foreground"
+              }`}
+            >
+              <div className="font-medium">
+                {tailStats.pendingCount > 0
+                  ? `tail backlog が ${tailStats.pendingCount} 件あります`
+                  : tailStats.processingCount > 0
+                    ? `tail backlog を処理中です（${tailStats.processingCount} 件）`
+                    : tailStats.failedCount > 0
+                      ? `tail backlog に failed が ${tailStats.failedCount} 件あります`
+                      : "tail backlog は空です"}
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                pending={tailStats.pendingCount} / processing={tailStats.processingCount} /
+                success={tailStats.successCount} / failed={tailStats.failedCount}
+                {" / "}next_retry_at={formatJst(tailStats.nextRetryAt)}
+              </div>
+            </div>
+          )}
 
           <div className="mt-4 flex flex-wrap gap-3">
             <Button
@@ -1285,13 +1453,43 @@ export default function ProductJsonImportV2Page() {
             >
               停止
             </Button>
-            <Button type="button" variant="secondary" onClick={() => fetchStatus(job.id)}>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => fetchStatus(job.id)}
+            >
               最新化
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      onClick={async () => {
+            </Button>
+            <Button
+              type="button"
+              variant={currentTailButtonVariant}
+              className={
+                currentTailButtonVariant === "default"
+                  ? "shadow-sm ring-2 ring-primary/20"
+                  : undefined
+              }
+              disabled={!job.doImageVectors || (runningTailJobs[job.id] ?? false)}
+              onClick={async () => {
+                try {
+                  setRunningTailJobs((prev) => ({ ...prev, [job.id]: true }));
+                  await handleRunTail(job);
+                } catch (tailError) {
+                  setError(
+                    tailError instanceof Error
+                      ? tailError.message
+                      : "tail処理に失敗しました"
+                  );
+                } finally {
+                  setRunningTailJobs((prev) => ({ ...prev, [job.id]: false }));
+                }
+              }}
+            >
+              {runningTailJobs[job.id] ? "tail自動実行中..." : "残り画像ベクトルを全部処理"}
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={async () => {
                 const next = await runBatch();
                 await fetchStatus(job.id);
                 if (next?.status === "completed") setIsRunning(false);
@@ -1317,6 +1515,7 @@ export default function ProductJsonImportV2Page() {
                 </div>
                 <div>limit: {limit}</div>
                 <div>timeBudgetMs: {timeBudgetMs}</div>
+                <div>maxVectorizeHeadImages: {maxVectorizeHeadImages}</div>
               </div>
               <DialogFooter>
                 <Button
@@ -1342,8 +1541,23 @@ export default function ProductJsonImportV2Page() {
             <div>処理開始: 自動でrunを繰り返します（進捗が止まるまで継続）。</div>
             <div>停止: 自動実行を止めます（処理中の行は次回再開時に続行）。</div>
             <div>最新化: ステータス表示だけを更新します。</div>
+            <div>残り画像ベクトルを全部処理: tail backlog が空になるか、進捗が止まるまで自動で繰り返します。</div>
             <div>1回実行: runを1回だけ実行します。</div>
           </div>
+          {currentTailSummary && (
+            <div className="mt-3 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+              <div className="font-medium text-foreground">直近の tail 実行結果</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                processed={currentTailSummary.processed} / success=
+                {currentTailSummary.success} / retried={currentTailSummary.retried} /
+                failed={currentTailSummary.failed} / requests={currentTailSummary.requests}
+                {currentTailSummary.completed ? " / 完了" : ""}
+                {currentTailSummary.stoppedReason
+                  ? ` / ${currentTailSummary.stoppedReason}`
+                  : ""}
+              </div>
+            </div>
+          )}
 
           <div className="mt-4 flex flex-wrap items-end gap-3 text-sm">
             <div className="space-y-1">
@@ -1417,17 +1631,38 @@ export default function ProductJsonImportV2Page() {
               />
             </div>
             <div className="space-y-1">
+              <label
+                htmlFor="maxVectorizeHeadImages"
+                className="text-xs text-muted-foreground"
+              >
+                初回ベクトル画像数
+              </label>
+              <div className="text-[11px] text-muted-foreground">
+                初回 run で処理する画像数。商品の総画像数がこの数以下なら最初から全画像を処理します。
+              </div>
+              <input
+                id="maxVectorizeHeadImages"
+                type="number"
+                min="1"
+                max="9"
+                value={maxVectorizeHeadImages}
+                onChange={(e) => setMaxVectorizeHeadImages(e.target.value)}
+                className="w-24 rounded-md border bg-background px-3 py-2 text-sm"
+                disabled={!job.doImageVectors}
+              />
+            </div>
+            <div className="space-y-1">
               <label htmlFor="vectorizeConcurrency" className="text-xs text-muted-foreground">
                 vectorize並列
               </label>
               <div className="text-[11px] text-muted-foreground">
-                画像ベクトル化の並列数。上げすぎると失敗率が上がります。
+                画像ベクトル化の並列数。1-8 で指定できます。上げすぎると失敗率が上がります。
               </div>
               <input
                 id="vectorizeConcurrency"
                 type="number"
                 min="1"
-                max="4"
+                max="8"
                 value={vectorizeConcurrency}
                 onChange={(e) => setVectorizeConcurrency(e.target.value)}
                 className="w-20 rounded-md border bg-background px-3 py-2 text-sm"
@@ -1524,10 +1759,18 @@ export default function ProductJsonImportV2Page() {
               };
               const isDeleting = deletingJobs[jobItem.id] ?? false;
               const isAdding = addingJobs[jobItem.id] ?? false;
+              const isRunningTail = runningTailJobs[jobItem.id] ?? false;
               const isPreviewOpen = jobPreviewOpen[jobItem.id] ?? false;
               const previewItems = jobPreviews[jobItem.id];
               const previewError = jobPreviewError[jobItem.id];
               const previewLoading = jobPreviewLoading[jobItem.id] ?? false;
+              const tailRunResult = tailRunResults[jobItem.id];
+              const isSelectedJob = job?.id === jobItem.id;
+              const selectedTailPending = isSelectedJob
+                ? (tailStats?.pendingCount ?? 0)
+                : 0;
+              const jobTailButtonVariant =
+                selectedTailPending > 0 ? "default" : "secondary";
               return (
                 <div
                   key={jobItem.id}
@@ -1626,6 +1869,38 @@ export default function ProductJsonImportV2Page() {
                     </Button>
                     <Button
                       type="button"
+                      variant={jobTailButtonVariant}
+                      className={
+                        jobTailButtonVariant === "default"
+                          ? "shadow-sm ring-2 ring-primary/20"
+                          : undefined
+                      }
+                      disabled={!jobItem.doImageVectors || isDeleting || isRunningTail}
+                      onClick={async () => {
+                        try {
+                          setRunningTailJobs((prev) => ({
+                            ...prev,
+                            [jobItem.id]: true,
+                          }));
+                          await handleRunTail(jobItem);
+                        } catch (actionError) {
+                          setError(
+                            actionError instanceof Error
+                              ? actionError.message
+                              : "tail処理に失敗しました"
+                          );
+                        } finally {
+                          setRunningTailJobs((prev) => ({
+                            ...prev,
+                            [jobItem.id]: false,
+                          }));
+                        }
+                      }}
+                    >
+                      {isRunningTail ? "tail自動実行中..." : "残り画像ベクトルを全部処理"}
+                    </Button>
+                    <Button
+                      type="button"
                       variant="secondary"
                       onClick={async () => {
                         const nextOpen = !isPreviewOpen;
@@ -1641,6 +1916,20 @@ export default function ProductJsonImportV2Page() {
                   <div className="mt-2 text-xs text-muted-foreground">
                     再処理は既存のフラグのまま、選んだステータスを pending に戻します。
                   </div>
+                  {tailRunResult && (
+                    <div className="mt-2 rounded-md border bg-background px-3 py-2 text-xs text-muted-foreground">
+                      <div className="font-medium text-foreground">直近の tail 実行結果</div>
+                      <div className="mt-1">
+                        processed={tailRunResult.processed} / success=
+                        {tailRunResult.success} / retried={tailRunResult.retried} / failed=
+                        {tailRunResult.failed} / requests={tailRunResult.requests}
+                        {tailRunResult.completed ? " / 完了" : ""}
+                        {tailRunResult.stoppedReason
+                          ? ` / ${tailRunResult.stoppedReason}`
+                          : ""}
+                      </div>
+                    </div>
+                  )}
                   {isPreviewOpen && (
                     <div className="mt-3 rounded-md border bg-background px-3 py-2 text-xs text-muted-foreground">
                       <div className="font-medium text-foreground">登録データのプレビュー</div>

@@ -87,8 +87,11 @@ export type ImportJobSummaryV2 = {
   completedAt: string | null;
 };
 
-export async function ensureProductImportTablesV2() {
-  const db = getDb();
+let ensureProductImportTablesV2Promise: Promise<void> | null = null;
+
+async function initializeProductImportTablesV2(
+  db: ReturnType<typeof getDb>
+): Promise<void> {
   await db`
     create table if not exists public.product_import_jobs_v2 (
       id uuid primary key,
@@ -283,6 +286,19 @@ export async function ensureProductImportTablesV2() {
     create index if not exists product_import_vectorize_tail_items_product_status_idx
       on public.product_import_vectorize_tail_items(product_id, status, slide_index)
   `;
+}
+
+export async function ensureProductImportTablesV2() {
+  const db = getDb();
+  if (!ensureProductImportTablesV2Promise) {
+    ensureProductImportTablesV2Promise = initializeProductImportTablesV2(db).catch(
+      (error) => {
+        ensureProductImportTablesV2Promise = null;
+        throw error;
+      }
+    );
+  }
+  await ensureProductImportTablesV2Promise;
   return db;
 }
 

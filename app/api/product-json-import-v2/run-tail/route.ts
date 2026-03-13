@@ -15,6 +15,7 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const DEFAULT_VECTOR_TAIL_LIMIT = 20;
+const DEFAULT_TIME_BUDGET_MS = 25_000;
 const MAX_RETRY_ATTEMPTS = 5;
 const MAX_RETRY_DELAY_SECONDS = 60;
 const VECTOR_TAIL_STALE_SECONDS = 120;
@@ -43,6 +44,7 @@ class ApiError extends Error {
 type RunTailPayload = {
   jobId?: unknown;
   limit?: unknown;
+  timeBudgetMs?: unknown;
 };
 
 function parseLimit(value: unknown): number {
@@ -52,13 +54,50 @@ function parseLimit(value: unknown): number {
   return DEFAULT_VECTOR_TAIL_LIMIT;
 }
 
+function parseTimeBudgetMs(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(1000, Math.min(25_000, Math.floor(value)));
+  }
+  return DEFAULT_TIME_BUDGET_MS;
+}
+
 function normalizeErrorMessage(message: string): string {
   const trimmed = message.trim();
   if (!trimmed) return "Unknown error";
   return trimmed.length > 1000 ? trimmed.slice(0, 1000) : trimmed;
 }
 
+function extractHttpStatus(error: unknown): number | null {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    typeof error.status === "number"
+  ) {
+    return error.status;
+  }
+
+  if (error instanceof Error) {
+    const match = error.message.match(/\b(?:failed|error):\s*(\d{3})\b/i);
+    if (match) {
+      return Number(match[1]);
+    }
+  }
+
+  return null;
+}
+
 function classifyRetry(error: unknown): { retryable: boolean; errorCode: string } {
+  const httpStatus = extractHttpStatus(error);
+  if (httpStatus === 429) {
+    return { retryable: true, errorCode: "http_429" };
+  }
+  if (httpStatus !== null && httpStatus >= 500 && httpStatus <= 599) {
+    return { retryable: true, errorCode: "http_5xx" };
+  }
+  if (httpStatus !== null) {
+    return { retryable: false, errorCode: `http_${httpStatus}` };
+  }
   if (error instanceof Error && error.name === "AbortError") {
     return { retryable: true, errorCode: "timeout" };
   }
@@ -119,70 +158,82 @@ export async function POST(req: Request) {
     if (!job) {
       throw new ApiError("jobが見つかりません", 404);
     }
+    const limit = parseLimit(payload.limit);
+    const timeBudgetMs = parseTimeBudgetMs(payload.timeBudgetMs);
+    const deadline = Date.now() + timeBudgetMs;
 
     await requeueStaleVectorizeTailItems({
       jobId,
       staleSeconds: VECTOR_TAIL_STALE_SECONDS,
     });
 
-    const items = await claimPendingVectorizeTailItems({
-      jobId,
-      limit: parseLimit(payload.limit),
-    });
-
     let success = 0;
     let retried = 0;
     let failed = 0;
+    let processed = 0;
 
-    await runWithConcurrency(
-      items.map((item) => async () => {
-        try {
-          const embedding = await embedOrReuseImageEmbedding(item.imageUrl);
-          await upsertProductImagesVectorize({
-            productId: item.productId,
-            cityCode: item.cityCode,
-            imageUrl: item.imageUrl,
-            imageEmbedding: embedding,
-            slideIndex: item.slideIndex,
-          });
-          await markVectorizeTailItemSuccess(item.id);
-          success += 1;
-        } catch (error) {
-          const message = normalizeErrorMessage(
-            error instanceof Error ? error.message : String(error)
-          );
-          const classified = classifyRetry(error);
-          const retryable =
-            classified.retryable && item.attemptCount < MAX_RETRY_ATTEMPTS;
+    while (Date.now() <= deadline - 500) {
+      const items = await claimPendingVectorizeTailItems({
+        jobId,
+        limit,
+      });
+      if (items.length === 0) {
+        break;
+      }
 
-          await markVectorizeTailItemFailure({
-            id: item.id,
-            retryable,
-            error: message,
-            errorCode: classified.errorCode,
-            retryAfterSeconds: retryable
-              ? calcRetryAfterSeconds(item.attemptCount)
-              : undefined,
-          });
+      processed += items.length;
 
-          if (retryable) {
-            retried += 1;
-            return;
+      await runWithConcurrency(
+        items.map((item) => async () => {
+          try {
+            const embedding = await embedOrReuseImageEmbedding(item.imageUrl);
+            await upsertProductImagesVectorize({
+              productId: item.productId,
+              cityCode: item.cityCode,
+              imageUrl: item.imageUrl,
+              imageEmbedding: embedding,
+              slideIndex: item.slideIndex,
+            });
+            await markVectorizeTailItemSuccess(item.id);
+            success += 1;
+          } catch (error) {
+            const message = normalizeErrorMessage(
+              error instanceof Error ? error.message : String(error)
+            );
+            const classified = classifyRetry(error);
+            const retryable =
+              classified.retryable && item.attemptCount < MAX_RETRY_ATTEMPTS;
+
+            await markVectorizeTailItemFailure({
+              id: item.id,
+              retryable,
+              error: message,
+              errorCode: classified.errorCode,
+              retryAfterSeconds: retryable
+                ? calcRetryAfterSeconds(item.attemptCount)
+                : undefined,
+            });
+
+            if (retryable) {
+              retried += 1;
+              return;
+            }
+
+            failed += 1;
           }
-
-          failed += 1;
-        }
-      }),
-      VECTOR_TAIL_CONCURRENCY
-    );
+        }),
+        VECTOR_TAIL_CONCURRENCY
+      );
+    }
 
     const tailStats = await getVectorizeTailStats(jobId);
     return Response.json({
       ok: true,
-      processed: items.length,
+      processed,
       success,
       retried,
       failed,
+      timeBudgetMs,
       tailStats,
     });
   } catch (error) {
