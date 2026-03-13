@@ -299,6 +299,7 @@ describe("POST /api/product-json-import-v2/run", () => {
     );
     expect(markItemFailureV2).not.toHaveBeenCalled();
     expect(json.retried).toBe(1);
+    expect(json.http429Count).toBe(1);
   });
 
   it("processes all images in the initial run when maxVectorizeHeadImages covers them", async () => {

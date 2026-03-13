@@ -670,7 +670,14 @@ export async function POST(req: Request) {
       throw new ApiError("jobが見つかりません", 404);
     }
     if (job.status === "completed") {
-      return Response.json({ ok: true, job, processed: 0, retried: 0, released: 0 });
+      return Response.json({
+        ok: true,
+        job,
+        processed: 0,
+        retried: 0,
+        released: 0,
+        http429Count: 0,
+      });
     }
 
     const limit = parseLimit(payload.limit);
@@ -689,6 +696,7 @@ export async function POST(req: Request) {
     let processedThisRun = 0;
     let retried = 0;
     let released = 0;
+    let http429Count = 0;
     const itemReports: ItemReport[] = [];
     const isLightJob = job.doTextEmbedding && !job.doImageCaptions && !job.doImageVectors;
     const claimLimit = isLightJob ? limit : Math.min(limit, HEAVY_JOB_CLAIM_LIMIT);
@@ -855,6 +863,9 @@ export async function POST(req: Request) {
               error instanceof Error ? error.message : "Unknown error"
             );
             const { retryable, errorCode } = classifyRetry(error);
+            if (errorCode === "http_429") {
+              http429Count += 1;
+            }
 
             if (retryable && item.attempt_count < MAX_RETRY_ATTEMPTS) {
               const retryAfterSeconds = calcRetryAfterSeconds(item.attempt_count);
@@ -1015,6 +1026,9 @@ export async function POST(req: Request) {
             error instanceof Error ? error.message : "Unknown error"
           );
           const { retryable, errorCode } = classifyRetry(error);
+          if (errorCode === "http_429") {
+            http429Count += 1;
+          }
 
           if (retryable && item.attempt_count < MAX_RETRY_ATTEMPTS) {
             const retryAfterSeconds = calcRetryAfterSeconds(item.attempt_count);
@@ -1076,6 +1090,7 @@ export async function POST(req: Request) {
       processed,
       retried,
       released,
+      http429Count,
       timeBudgetMs,
       itemReports: debugTimings ? itemReports.slice(-50) : undefined,
     });

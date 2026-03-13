@@ -171,6 +171,7 @@ export async function POST(req: Request) {
     let retried = 0;
     let failed = 0;
     let processed = 0;
+    let http429Count = 0;
 
     while (Date.now() <= deadline - 500) {
       const items = await claimPendingVectorizeTailItems({
@@ -201,6 +202,9 @@ export async function POST(req: Request) {
               error instanceof Error ? error.message : String(error)
             );
             const classified = classifyRetry(error);
+            if (classified.errorCode === "http_429") {
+              http429Count += 1;
+            }
             const retryable =
               classified.retryable && item.attemptCount < MAX_RETRY_ATTEMPTS;
 
@@ -233,6 +237,7 @@ export async function POST(req: Request) {
       success,
       retried,
       failed,
+      http429Count,
       timeBudgetMs,
       tailStats,
     });

@@ -230,6 +230,7 @@ describe("POST /api/product-json-import-v2/run-tail", () => {
     expect(markItemFailureV2).not.toHaveBeenCalled();
     expect(json.retried).toBe(1);
     expect(json.failed).toBe(0);
+    expect(json.http429Count).toBe(1);
   });
 
   it("loops over multiple tail batches within one request", async () => {
