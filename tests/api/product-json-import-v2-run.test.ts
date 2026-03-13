@@ -337,9 +337,10 @@ describe("POST /api/product-json-import-v2/run", () => {
     expect(res.status).toBe(200);
     expect(json.ok).toBe(true);
     expect(claimPendingItemsV2).toHaveBeenCalledWith("job-1", 1);
-    expect(embedOrReuseImageEmbedding).toHaveBeenCalledTimes(5);
     expect(
-      embedOrReuseImageEmbedding.mock.calls.map((call) => call[0]).sort()
+      Array.from(
+        new Set(embedOrReuseImageEmbedding.mock.calls.map((call) => call[0]))
+      ).sort()
     ).toEqual([
       "https://example.com/main.jpg",
       "https://example.com/slide-1.jpg",

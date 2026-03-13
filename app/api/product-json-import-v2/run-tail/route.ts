@@ -20,6 +20,7 @@ const MAX_RETRY_ATTEMPTS = 5;
 const MAX_RETRY_DELAY_SECONDS = 60;
 const VECTOR_TAIL_STALE_SECONDS = 120;
 const MAX_VECTOR_TAIL_CONCURRENCY = 2;
+const VECTORIZE_TASK_START_INTERVAL_MS = 150;
 
 function parseConcurrency(value: string | undefined, fallback: number, max: number) {
   const parsed = value ? Number(value) : NaN;
@@ -127,17 +128,27 @@ function calcRetryAfterSeconds(attemptCount: number): number {
 
 async function runWithConcurrency<T>(
   tasks: Array<() => Promise<T>>,
-  concurrency: number
+  concurrency: number,
+  options?: { minStartIntervalMs?: number }
 ): Promise<T[]> {
   const limit = Math.max(1, Math.floor(concurrency));
   const results: T[] = new Array(tasks.length);
   let nextIndex = 0;
+  let nextStartAt = 0;
 
   const worker = async () => {
     while (true) {
       const current = nextIndex;
       nextIndex += 1;
       if (current >= tasks.length) return;
+      if ((options?.minStartIntervalMs ?? 0) > 0) {
+        const now = Date.now();
+        const scheduledAt = Math.max(now, nextStartAt);
+        nextStartAt = scheduledAt + (options?.minStartIntervalMs ?? 0);
+        if (scheduledAt > now) {
+          await new Promise((resolve) => setTimeout(resolve, scheduledAt - now));
+        }
+      }
       results[current] = await tasks[current]!();
     }
   };
@@ -246,7 +257,8 @@ export async function POST(req: Request) {
             failed += 1;
           }
         }),
-        currentVectorizeConcurrency
+        currentVectorizeConcurrency,
+        { minStartIntervalMs: VECTORIZE_TASK_START_INTERVAL_MS }
       );
 
       if (batchSaw429) {

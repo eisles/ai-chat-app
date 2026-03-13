@@ -46,6 +46,7 @@ const MAX_RETRY_DELAY_SECONDS = 60;
 const STALE_PROCESSING_SECONDS = 120;
 const HEAVY_WORK_MIN_REMAINING_MS = 6000;
 const HEAVY_JOB_CLAIM_LIMIT = 1;
+const VECTORIZE_TASK_START_INTERVAL_MS = 150;
 
 const CAPTION_TEXT_SOURCES = [
   "image_caption",
@@ -309,17 +310,27 @@ function splitVectorizeImages(options: {
 
 async function runWithConcurrency<T>(
   tasks: Array<() => Promise<T>>,
-  concurrency: number
+  concurrency: number,
+  options?: { minStartIntervalMs?: number }
 ): Promise<T[]> {
   const limit = Math.max(1, Math.floor(concurrency));
   const results: T[] = new Array(tasks.length);
   let nextIndex = 0;
+  let nextStartAt = 0;
 
   const worker = async () => {
     while (true) {
       const current = nextIndex;
       nextIndex += 1;
       if (current >= tasks.length) return;
+      if ((options?.minStartIntervalMs ?? 0) > 0) {
+        const now = Date.now();
+        const scheduledAt = Math.max(now, nextStartAt);
+        nextStartAt = scheduledAt + (options?.minStartIntervalMs ?? 0);
+        if (scheduledAt > now) {
+          await new Promise((resolve) => setTimeout(resolve, scheduledAt - now));
+        }
+      }
       results[current] = await tasks[current]!();
     }
   };
@@ -555,7 +566,9 @@ async function processProductItem(options: {
       });
 
       await timeStep("vectorize_images_total", async () => {
-        await runWithConcurrency(vectorTasks, options.vectorizeConcurrency);
+        await runWithConcurrency(vectorTasks, options.vectorizeConcurrency, {
+          minStartIntervalMs: VECTORIZE_TASK_START_INTERVAL_MS,
+        });
       });
 
       await timeStep(

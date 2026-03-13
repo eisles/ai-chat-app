@@ -30,6 +30,9 @@ const DEFAULT_VECTORIZE_ENDPOINT = "https://convertvectorapi.onrender.com/vector
 const VECTORIZE_ENDPOINT =
   process.env.VECTORIZE_ENDPOINT ?? DEFAULT_VECTORIZE_ENDPOINT;
 const TARGET_DIM = 512;
+const VECTORIZE_SHORT_RETRY_ATTEMPTS = 3;
+const VECTORIZE_SHORT_RETRY_BASE_DELAY_MS = 600;
+const VECTORIZE_SHORT_RETRY_MAX_DELAY_MS = 2_500;
 let productImagesVectorizeInitPromise: Promise<ReturnType<typeof getDb>> | null =
   null;
 
@@ -67,55 +70,95 @@ async function downloadImageAsBlob(url: string) {
   return { blob, filename };
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterMs(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.floor(seconds * 1000);
+  }
+  const dateMs = Date.parse(value);
+  if (Number.isNaN(dateMs)) return null;
+  return Math.max(0, dateMs - Date.now());
+}
+
+function calcShortRetryDelayMs(attempt: number, retryAfterMs: number | null) {
+  if (retryAfterMs !== null) {
+    return Math.max(200, Math.min(VECTORIZE_SHORT_RETRY_MAX_DELAY_MS, retryAfterMs));
+  }
+  const jitterMs = Math.floor(Math.random() * 250);
+  const exponentialMs = VECTORIZE_SHORT_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+  return Math.max(
+    200,
+    Math.min(VECTORIZE_SHORT_RETRY_MAX_DELAY_MS, exponentialMs + jitterMs)
+  );
+}
+
 export async function embedWithVectorizeApi(imageUrl: string) {
   const { blob, filename } = await downloadImageAsBlob(imageUrl);
   const startedAt = Date.now();
 
-  const formData = new FormData();
-  formData.append("file", blob, filename);
-  formData.append("options", JSON.stringify({ timeout_ms: 20000 }));
+  for (let attempt = 1; attempt <= VECTORIZE_SHORT_RETRY_ATTEMPTS; attempt += 1) {
+    const formData = new FormData();
+    formData.append("file", blob, filename);
+    formData.append("options", JSON.stringify({ timeout_ms: 20000 }));
 
-  const response = await fetch(VECTORIZE_ENDPOINT, {
-    method: "POST",
-    body: formData,
-  });
+    const response = await fetch(VECTORIZE_ENDPOINT, {
+      method: "POST",
+      body: formData,
+    });
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Vectorize API failed: ${response.status} ${body}`);
+    if (!response.ok) {
+      const body = await response.text();
+      const status = response.status;
+      const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+      const retryable =
+        (status === 429 || (status >= 500 && status <= 599)) &&
+        attempt < VECTORIZE_SHORT_RETRY_ATTEMPTS;
+      if (retryable) {
+        await sleep(calcShortRetryDelayMs(attempt, retryAfterMs));
+        continue;
+      }
+      throw new Error(`Vectorize API failed: ${status} ${body}`);
+    }
+
+    const json = (await response.json()) as {
+      embedding?: number[];
+      model?: string;
+      dim?: number;
+      normalized?: boolean;
+    };
+
+    const vector = json?.embedding;
+    if (!vector || !Array.isArray(vector)) {
+      throw new Error("Invalid embedding response from Vectorize API");
+    }
+    if (vector.length !== TARGET_DIM) {
+      throw new Error(
+        `Unexpected embedding length: ${vector.length} (expected ${TARGET_DIM})`
+      );
+    }
+    if (typeof json?.dim === "number" && json.dim !== TARGET_DIM) {
+      throw new Error(
+        `Unexpected embedding dim: ${json.dim} (expected ${TARGET_DIM})`
+      );
+    }
+
+    const durationMs = Date.now() - startedAt;
+    return {
+      vector,
+      durationMs,
+      byteSize: vector.length * 4,
+      model: json?.model ?? "unknown",
+      dim: json?.dim ?? vector.length,
+      normalized: json?.normalized ?? null,
+    };
   }
 
-  const json = (await response.json()) as {
-    embedding?: number[];
-    model?: string;
-    dim?: number;
-    normalized?: boolean;
-  };
-
-  const vector = json?.embedding;
-  if (!vector || !Array.isArray(vector)) {
-    throw new Error("Invalid embedding response from Vectorize API");
-  }
-  if (vector.length !== TARGET_DIM) {
-    throw new Error(
-      `Unexpected embedding length: ${vector.length} (expected ${TARGET_DIM})`
-    );
-  }
-  if (typeof json?.dim === "number" && json.dim !== TARGET_DIM) {
-    throw new Error(
-      `Unexpected embedding dim: ${json.dim} (expected ${TARGET_DIM})`
-    );
-  }
-
-  const durationMs = Date.now() - startedAt;
-  return {
-    vector,
-    durationMs,
-    byteSize: vector.length * 4,
-    model: json?.model ?? "unknown",
-    dim: json?.dim ?? vector.length,
-    normalized: json?.normalized ?? null,
-  };
+  throw new Error("Vectorize API failed: retry exhausted");
 }
 
 async function ensureProductImagesVectorizeTable() {

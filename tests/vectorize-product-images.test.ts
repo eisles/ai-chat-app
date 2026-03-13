@@ -106,4 +106,54 @@ describe("embedOrReuseImageEmbedding", () => {
     expect(result.vector).toHaveLength(512);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it("retries vectorize 429 responses before succeeding", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "https://example.com/retry.jpg") {
+        return {
+          ok: true,
+          arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+          headers: { get: () => "image/jpeg" },
+          text: async () => "",
+        };
+      }
+
+      const vectorizeCalls = fetchMock.mock.calls.filter(
+        ([value]) => String(value) === "https://convertvectorapi.onrender.com/vectorize"
+      ).length;
+      if (vectorizeCalls === 1) {
+        return {
+          ok: false,
+          status: 429,
+          headers: {
+            get: (name: string) =>
+              name.toLowerCase() === "retry-after" ? "0" : null,
+          },
+          text: async () => "throttled",
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({
+          embedding: new Array(512).fill(0.5),
+          model: "vectorize-model",
+          dim: 512,
+          normalized: true,
+        }),
+        headers: { get: () => null },
+        text: async () => "",
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await embedOrReuseImageEmbedding(
+      "https://example.com/retry.jpg",
+      { ensureTable: false }
+    );
+
+    expect(result.source).toBe("vectorize_api");
+    expect(result.vector).toHaveLength(512);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
 });
