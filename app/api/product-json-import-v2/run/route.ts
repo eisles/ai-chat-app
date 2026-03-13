@@ -41,11 +41,12 @@ const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 const DEFAULT_LIMIT = 5;
 const DEFAULT_TIME_BUDGET_MS = 10_000;
 const DEFAULT_MAX_VECTORIZE_HEAD_IMAGES = 4;
+const DEFAULT_HEAVY_ITEM_CONCURRENCY = 2;
+const MAX_HEAVY_ITEM_CONCURRENCY = 4;
 const MAX_RETRY_ATTEMPTS = 5;
 const MAX_RETRY_DELAY_SECONDS = 60;
 const STALE_PROCESSING_SECONDS = 120;
 const HEAVY_WORK_MIN_REMAINING_MS = 6000;
-const HEAVY_JOB_CLAIM_LIMIT = 1;
 const VECTORIZE_TASK_START_INTERVAL_MS = 150;
 
 const CAPTION_TEXT_SOURCES = [
@@ -78,6 +79,11 @@ const TEXT_CONCURRENCY = parseConcurrency(
   6
 );
 const MAX_VECTORIZE_CONCURRENCY = 8;
+const MAX_TOTAL_VECTORIZE_IN_FLIGHT = parseConcurrency(
+  process.env.PRODUCT_IMPORT_V2_MAX_TOTAL_VECTORIZE_IN_FLIGHT,
+  5,
+  16
+);
 const VECTORIZE_CONCURRENCY = parseConcurrency(
   process.env.PRODUCT_IMPORT_V2_VECTORIZE_CONCURRENCY,
   2,
@@ -97,7 +103,9 @@ type RunPayload = {
   jobId?: unknown;
   limit?: unknown;
   timeBudgetMs?: unknown;
+  heavyItemConcurrency?: unknown;
   maxVectorizeHeadImages?: unknown;
+  maxTotalVectorizeInFlight?: unknown;
   debugTimings?: unknown;
   textConcurrency?: unknown;
   captionConcurrency?: unknown;
@@ -343,6 +351,38 @@ async function runWithConcurrency<T>(
   return results;
 }
 
+function createAsyncSemaphore(limit: number) {
+  const max = Math.max(1, Math.floor(limit));
+  let active = 0;
+  const waiters: Array<() => void> = [];
+
+  const acquire = async () => {
+    if (active < max) {
+      active += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => waiters.push(resolve));
+    active += 1;
+  };
+
+  const release = () => {
+    active = Math.max(0, active - 1);
+    const next = waiters.shift();
+    if (next) next();
+  };
+
+  return {
+    async use<T>(fn: () => Promise<T>): Promise<T> {
+      await acquire();
+      try {
+        return await fn();
+      } finally {
+        release();
+      }
+    },
+  };
+}
+
 async function processProductItem(options: {
   jobId: string;
   itemId: string;
@@ -357,6 +397,7 @@ async function processProductItem(options: {
   captionConcurrency: number;
   vectorizeConcurrency: number;
   maxVectorizeHeadImages: number;
+  vectorizeSemaphore: { use<T>(fn: () => Promise<T>): Promise<T> };
   knownProductJsonExists?: boolean;
   knownCaptionExists?: boolean;
   debugTimings: boolean;
@@ -554,7 +595,23 @@ async function processProductItem(options: {
             : `vectorize_slide_${item.slideIndex}`;
 
         await timeStep(stepName, async () => {
-          const embedding = await embedOrReuseImageEmbedding(item.imageUrl);
+          const embedding = await options.vectorizeSemaphore.use(() =>
+            embedOrReuseImageEmbedding(item.imageUrl)
+          );
+          if (options.debugTimings && embedding.source === "vectorize_api") {
+            if (typeof embedding.downloadDurationMs === "number") {
+              steps.push({
+                step: `${stepName}_download`,
+                ms: embedding.downloadDurationMs,
+              });
+            }
+            if (typeof embedding.apiDurationMs === "number") {
+              steps.push({
+                step: `${stepName}_api`,
+                ms: embedding.apiDurationMs,
+              });
+            }
+          }
           await upsertProductImagesVectorize({
             productId,
             cityCode: product.city_code ?? null,
@@ -683,6 +740,16 @@ export async function POST(req: Request) {
       VECTORIZE_CONCURRENCY,
       MAX_VECTORIZE_CONCURRENCY
     );
+    const heavyItemConcurrency = parseConcurrencyOverride(
+      payload.heavyItemConcurrency,
+      DEFAULT_HEAVY_ITEM_CONCURRENCY,
+      MAX_HEAVY_ITEM_CONCURRENCY
+    );
+    const maxTotalVectorizeInFlight = parseConcurrencyOverride(
+      payload.maxTotalVectorizeInFlight,
+      MAX_TOTAL_VECTORIZE_IN_FLIGHT,
+      16
+    );
     const job = await getImportJobV2(jobId);
     if (!job) {
       throw new ApiError("jobが見つかりません", 404);
@@ -717,9 +784,10 @@ export async function POST(req: Request) {
     let released = 0;
     let http429Count = 0;
     let currentVectorizeConcurrency = vectorizeConcurrency;
+    const vectorizeSemaphore = createAsyncSemaphore(maxTotalVectorizeInFlight);
     const itemReports: ItemReport[] = [];
     const isLightJob = job.doTextEmbedding && !job.doImageCaptions && !job.doImageVectors;
-    const claimLimit = isLightJob ? limit : Math.min(limit, HEAVY_JOB_CLAIM_LIMIT);
+    const claimLimit = isLightJob ? limit : Math.min(limit, heavyItemConcurrency);
 
     while (Date.now() <= deadline - 500) {
       if (
@@ -841,6 +909,7 @@ export async function POST(req: Request) {
               captionConcurrency,
               vectorizeConcurrency: currentVectorizeConcurrency,
               maxVectorizeHeadImages,
+              vectorizeSemaphore,
               knownProductJsonExists: item.product_id
                 ? existingTextIds.has(item.product_id)
                 : undefined,
@@ -959,8 +1028,7 @@ export async function POST(req: Request) {
         continue;
       }
 
-      for (let i = 0; i < remainingItems.length; i += 1) {
-        const item = remainingItems[i];
+      for (let i = 0; i < remainingItems.length; i += heavyItemConcurrency) {
         const remainingMs = deadline - Date.now();
         if (Date.now() > deadline - 500) {
           const remainingIds = remainingItems.slice(i).map((x) => x.id);
@@ -1005,134 +1073,142 @@ export async function POST(req: Request) {
           }
           break;
         }
+        const batch = remainingItems.slice(i, i + heavyItemConcurrency);
+        const batchConcurrency = Math.min(heavyItemConcurrency, batch.length);
 
-        try {
-          const { outcome, steps } = await processProductItem({
-            jobId,
-            itemId: item.id,
-            productJson: item.product_json,
-            productId: item.product_id,
-            cityCode: item.city_code,
-            existingBehavior: job.existingBehavior,
-            doTextEmbedding: job.doTextEmbedding,
-            doImageCaptions: job.doImageCaptions,
-            doImageVectors: job.doImageVectors,
-            captionImageInput: job.captionImageInput,
-            captionConcurrency,
-            vectorizeConcurrency: currentVectorizeConcurrency,
-            maxVectorizeHeadImages,
-            knownProductJsonExists: item.product_id
-              ? existingTextIds.has(item.product_id)
-              : undefined,
-            knownCaptionExists: item.product_id
-              ? existingCaptionIds.has(item.product_id)
-              : undefined,
-            debugTimings,
-          });
-          if (outcome === "skipped") {
-            await markItemSkippedV2({ itemId: item.id, jobId });
-            if (debugTimings) {
-              itemReports.push({
+        await runWithConcurrency(
+          batch.map((item) => async () => {
+            try {
+              const { outcome, steps } = await processProductItem({
+                jobId,
                 itemId: item.id,
-                rowIndex: item.row_index,
-                productId: item.product_id ?? null,
-                cityCode: item.city_code ?? null,
-                outcome: "skipped",
-                attemptCount: item.attempt_count,
-                steps,
+                productJson: item.product_json,
+                productId: item.product_id,
+                cityCode: item.city_code,
+                existingBehavior: job.existingBehavior,
+                doTextEmbedding: job.doTextEmbedding,
+                doImageCaptions: job.doImageCaptions,
+                doImageVectors: job.doImageVectors,
+                captionImageInput: job.captionImageInput,
+                captionConcurrency,
+                vectorizeConcurrency: currentVectorizeConcurrency,
+                maxVectorizeHeadImages,
+                vectorizeSemaphore,
+                knownProductJsonExists: item.product_id
+                  ? existingTextIds.has(item.product_id)
+                  : undefined,
+                knownCaptionExists: item.product_id
+                  ? existingCaptionIds.has(item.product_id)
+                  : undefined,
+                debugTimings,
               });
-            }
-          } else {
-            await markItemSuccessV2({ itemId: item.id, jobId });
-            if (debugTimings) {
-              itemReports.push({
-                itemId: item.id,
-                rowIndex: item.row_index,
-                productId: item.product_id ?? null,
-                cityCode: item.city_code ?? null,
-                outcome: "success",
-                attemptCount: item.attempt_count,
-                steps,
-              });
-            }
-          }
-          processed += 1;
-          processedThisRun += 1;
-        } catch (error) {
-          const message = normalizeErrorMessage(
-            error instanceof Error ? error.message : "Unknown error"
-          );
-            const { retryable, errorCode } = classifyRetry(error);
-            const previousVectorizeConcurrency = currentVectorizeConcurrency;
-            if (errorCode === "http_429") {
-              http429Count += 1;
-              currentVectorizeConcurrency = lowerConcurrencyOn429(
-                currentVectorizeConcurrency,
-                errorCode
+              if (outcome === "skipped") {
+                await markItemSkippedV2({ itemId: item.id, jobId });
+                if (debugTimings) {
+                  itemReports.push({
+                    itemId: item.id,
+                    rowIndex: item.row_index,
+                    productId: item.product_id ?? null,
+                    cityCode: item.city_code ?? null,
+                    outcome: "skipped",
+                    attemptCount: item.attempt_count,
+                    steps,
+                  });
+                }
+              } else {
+                await markItemSuccessV2({ itemId: item.id, jobId });
+                if (debugTimings) {
+                  itemReports.push({
+                    itemId: item.id,
+                    rowIndex: item.row_index,
+                    productId: item.product_id ?? null,
+                    cityCode: item.city_code ?? null,
+                    outcome: "success",
+                    attemptCount: item.attempt_count,
+                    steps,
+                  });
+                }
+              }
+              processed += 1;
+              processedThisRun += 1;
+            } catch (error) {
+              const message = normalizeErrorMessage(
+                error instanceof Error ? error.message : "Unknown error"
               );
-            }
-            const downgraded =
-              currentVectorizeConcurrency < previousVectorizeConcurrency;
+              const { retryable, errorCode } = classifyRetry(error);
+              const previousVectorizeConcurrency = currentVectorizeConcurrency;
+              if (errorCode === "http_429") {
+                http429Count += 1;
+                currentVectorizeConcurrency = lowerConcurrencyOn429(
+                  currentVectorizeConcurrency,
+                  errorCode
+                );
+              }
+              const downgraded =
+                currentVectorizeConcurrency < previousVectorizeConcurrency;
 
-          if (retryable && item.attempt_count < MAX_RETRY_ATTEMPTS) {
-            const retryAfterSeconds = calcRetryAfterSeconds(item.attempt_count);
-            await markItemRetryV2({
-              itemId: item.id,
-              jobId,
-              error: message,
-              errorCode,
-              retryAfterSeconds,
-            });
-            retried += 1;
-            if (debugTimings) {
-              itemReports.push({
+              if (retryable && item.attempt_count < MAX_RETRY_ATTEMPTS) {
+                const retryAfterSeconds = calcRetryAfterSeconds(item.attempt_count);
+                await markItemRetryV2({
+                  itemId: item.id,
+                  jobId,
+                  error: message,
+                  errorCode,
+                  retryAfterSeconds,
+                });
+                retried += 1;
+                if (debugTimings) {
+                  itemReports.push({
+                    itemId: item.id,
+                    rowIndex: item.row_index,
+                    productId: item.product_id ?? null,
+                    cityCode: item.city_code ?? null,
+                    outcome: "retry",
+                    attemptCount: item.attempt_count,
+                    steps: [
+                      ...(downgraded
+                        ? [{ step: "vectorize_concurrency_downgraded", ms: 0 }]
+                        : []),
+                      { step: "retry_scheduled", ms: 0 },
+                    ],
+                    error: message,
+                    errorCode,
+                    retryAfterSeconds,
+                  });
+                }
+                return;
+              }
+
+              await markItemFailureV2({
                 itemId: item.id,
-                rowIndex: item.row_index,
-                productId: item.product_id ?? null,
-                cityCode: item.city_code ?? null,
-                outcome: "retry",
-                attemptCount: item.attempt_count,
-                steps: [
-                  ...(downgraded
-                    ? [{ step: "vectorize_concurrency_downgraded", ms: 0 }]
-                    : []),
-                  { step: "retry_scheduled", ms: 0 },
-                ],
+                jobId,
                 error: message,
                 errorCode,
-                retryAfterSeconds,
               });
+              processed += 1;
+              processedThisRun += 1;
+              if (debugTimings) {
+                itemReports.push({
+                  itemId: item.id,
+                  rowIndex: item.row_index,
+                  productId: item.product_id ?? null,
+                  cityCode: item.city_code ?? null,
+                  outcome: "failed",
+                  attemptCount: item.attempt_count,
+                  steps: [
+                    ...(downgraded
+                      ? [{ step: "vectorize_concurrency_downgraded", ms: 0 }]
+                      : []),
+                    { step: "failed", ms: 0 },
+                  ],
+                  error: message,
+                  errorCode,
+                });
+              }
             }
-            continue;
-          }
-
-          await markItemFailureV2({
-            itemId: item.id,
-            jobId,
-            error: message,
-            errorCode,
-          });
-          processed += 1;
-          processedThisRun += 1;
-          if (debugTimings) {
-            itemReports.push({
-              itemId: item.id,
-              rowIndex: item.row_index,
-              productId: item.product_id ?? null,
-              cityCode: item.city_code ?? null,
-              outcome: "failed",
-              attemptCount: item.attempt_count,
-              steps: [
-                ...(downgraded
-                  ? [{ step: "vectorize_concurrency_downgraded", ms: 0 }]
-                  : []),
-                { step: "failed", ms: 0 },
-              ],
-              error: message,
-              errorCode,
-            });
-          }
-        }
+          }),
+          batchConcurrency
+        );
       }
     }
 

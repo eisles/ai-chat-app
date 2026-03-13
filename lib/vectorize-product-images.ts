@@ -8,6 +8,9 @@ export type ImageVector = {
   model: string;
   dim: number;
   normalized: boolean | null;
+  downloadDurationMs?: number | null;
+  apiDurationMs?: number | null;
+  vectorizeAttempts?: number | null;
 };
 
 export type ImageEmbeddingSource = "stored_image_url" | "vectorize_api";
@@ -98,18 +101,23 @@ function calcShortRetryDelayMs(attempt: number, retryAfterMs: number | null) {
 }
 
 export async function embedWithVectorizeApi(imageUrl: string) {
+  const downloadStartedAt = Date.now();
   const { blob, filename } = await downloadImageAsBlob(imageUrl);
+  const downloadDurationMs = Date.now() - downloadStartedAt;
   const startedAt = Date.now();
+  let apiDurationMs = 0;
 
   for (let attempt = 1; attempt <= VECTORIZE_SHORT_RETRY_ATTEMPTS; attempt += 1) {
     const formData = new FormData();
     formData.append("file", blob, filename);
     formData.append("options", JSON.stringify({ timeout_ms: 20000 }));
 
+    const apiStartedAt = Date.now();
     const response = await fetch(VECTORIZE_ENDPOINT, {
       method: "POST",
       body: formData,
     });
+    apiDurationMs += Date.now() - apiStartedAt;
 
     if (!response.ok) {
       const body = await response.text();
@@ -155,6 +163,9 @@ export async function embedWithVectorizeApi(imageUrl: string) {
       model: json?.model ?? "unknown",
       dim: json?.dim ?? vector.length,
       normalized: json?.normalized ?? null,
+      downloadDurationMs,
+      apiDurationMs,
+      vectorizeAttempts: attempt,
     };
   }
 

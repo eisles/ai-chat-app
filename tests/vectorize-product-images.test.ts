@@ -105,6 +105,9 @@ describe("embedOrReuseImageEmbedding", () => {
     expect(result.source).toBe("vectorize_api");
     expect(result.vector).toHaveLength(512);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.downloadDurationMs).toBeTypeOf("number");
+    expect(result.apiDurationMs).toBeTypeOf("number");
+    expect(result.vectorizeAttempts).toBe(1);
   });
 
   it("retries vectorize 429 responses before succeeding", async () => {
@@ -155,5 +158,6 @@ describe("embedOrReuseImageEmbedding", () => {
     expect(result.source).toBe("vectorize_api");
     expect(result.vector).toHaveLength(512);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.vectorizeAttempts).toBe(2);
   });
 });

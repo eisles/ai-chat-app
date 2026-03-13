@@ -270,9 +270,11 @@ export default function ProductJsonImportV2Page() {
   const [timeBudgetMs, setTimeBudgetMs] = useState("10000");
   const [avgImageCount, setAvgImageCount] = useState("1");
   const [maxVectorizeHeadImages, setMaxVectorizeHeadImages] = useState("4");
+  const [heavyItemConcurrency, setHeavyItemConcurrency] = useState("2");
   const [textConcurrency, setTextConcurrency] = useState("2");
   const [captionConcurrency, setCaptionConcurrency] = useState("4");
   const [vectorizeConcurrency, setVectorizeConcurrency] = useState("2");
+  const [maxTotalVectorizeInFlight, setMaxTotalVectorizeInFlight] = useState("5");
   const [debugTimings, setDebugTimings] = useState(true);
   const [lastRun, setLastRun] = useState<RunResponse | null>(null);
 
@@ -529,9 +531,11 @@ export default function ProductJsonImportV2Page() {
         limit: parseInt(limit, 10) || 5,
         timeBudgetMs: parseInt(timeBudgetMs, 10) || 10000,
         debugTimings,
+        heavyItemConcurrency: parseInt(heavyItemConcurrency, 10) || 2,
         textConcurrency: parseInt(textConcurrency, 10) || 2,
         captionConcurrency: parseInt(captionConcurrency, 10) || 4,
         vectorizeConcurrency: parseInt(vectorizeConcurrency, 10) || 2,
+        maxTotalVectorizeInFlight: parseInt(maxTotalVectorizeInFlight, 10) || 5,
         maxVectorizeHeadImages: parseInt(maxVectorizeHeadImages, 10) || 4,
       }),
     });
@@ -1739,6 +1743,27 @@ export default function ProductJsonImportV2Page() {
             </div>
             <div className="space-y-1">
               <label
+                htmlFor="heavyItemConcurrency"
+                className="text-xs text-muted-foreground"
+              >
+                商品並列
+              </label>
+              <div className="text-[11px] text-muted-foreground">
+                画像ジョブで同時に進める商品数。上げすぎると DB 待ちや vectorize 待ちが増えます。
+              </div>
+              <input
+                id="heavyItemConcurrency"
+                type="number"
+                min="1"
+                max="4"
+                value={heavyItemConcurrency}
+                onChange={(e) => setHeavyItemConcurrency(e.target.value)}
+                className="w-20 rounded-md border bg-background px-3 py-2 text-sm"
+                disabled={!job.doImageCaptions && !job.doImageVectors}
+              />
+            </div>
+            <div className="space-y-1">
+              <label
                 htmlFor="maxVectorizeHeadImages"
                 className="text-xs text-muted-foreground"
               >
@@ -1754,6 +1779,27 @@ export default function ProductJsonImportV2Page() {
                 max="9"
                 value={maxVectorizeHeadImages}
                 onChange={(e) => setMaxVectorizeHeadImages(e.target.value)}
+                className="w-24 rounded-md border bg-background px-3 py-2 text-sm"
+                disabled={!job.doImageVectors}
+              />
+            </div>
+            <div className="space-y-1">
+              <label
+                htmlFor="maxTotalVectorizeInFlight"
+                className="text-xs text-muted-foreground"
+              >
+                総vectorize上限
+              </label>
+              <div className="text-[11px] text-muted-foreground">
+                run 全体で同時に走らせる画像ベクトル化の上限。商品間並列を使う時の安全弁です。
+              </div>
+              <input
+                id="maxTotalVectorizeInFlight"
+                type="number"
+                min="1"
+                max="16"
+                value={maxTotalVectorizeInFlight}
+                onChange={(e) => setMaxTotalVectorizeInFlight(e.target.value)}
                 className="w-24 rounded-md border bg-background px-3 py-2 text-sm"
                 disabled={!job.doImageVectors}
               />

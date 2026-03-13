@@ -117,6 +117,10 @@ describe("POST /api/product-json-import-v2/run", () => {
       model: "vectorize-test",
       dim: 2,
       normalized: true,
+      source: "vectorize_api",
+      reusedFrom: null,
+      downloadDurationMs: 3,
+      apiDurationMs: 7,
     });
     upsertProductImagesVectorize.mockResolvedValue(undefined);
     enqueueVectorizeTailItems.mockResolvedValue(3);
@@ -234,7 +238,7 @@ describe("POST /api/product-json-import-v2/run", () => {
     expect(markItemSuccessV2).toHaveBeenCalledWith({ itemId: "item-2", jobId: "job-1" });
   });
 
-  it("limits heavy jobs to one claimed item even if the requested limit is larger", async () => {
+  it("limits heavy jobs to two claimed items even if the requested limit is larger", async () => {
     getImportJobV2
       .mockResolvedValueOnce(createVectorJob())
       .mockResolvedValueOnce(createVectorJob({ status: "running" }));
@@ -255,7 +259,101 @@ describe("POST /api/product-json-import-v2/run", () => {
 
     expect(res.status).toBe(200);
     expect(json.ok).toBe(true);
-    expect(claimPendingItemsV2).toHaveBeenCalledWith("job-1", 1);
+    expect(claimPendingItemsV2).toHaveBeenCalledWith("job-1", 2);
+  });
+
+  it("allows overriding heavy product concurrency from the request payload", async () => {
+    getImportJobV2
+      .mockResolvedValueOnce(createVectorJob())
+      .mockResolvedValueOnce(createVectorJob({ status: "running" }));
+    claimPendingItemsV2.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+
+    const req = new Request("http://localhost/api/product-json-import-v2/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId: "job-1",
+        limit: 5,
+        timeBudgetMs: 25_000,
+        heavyItemConcurrency: 3,
+      }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(claimPendingItemsV2).toHaveBeenCalledWith("job-1", 3);
+  });
+
+  it("caps total vectorize in-flight across two heavy products using the request override", async () => {
+    const pendingItems = [
+      {
+        id: "item-a",
+        row_index: 4,
+        city_code: "01101",
+        product_id: "p-a",
+        product_json: createProductJson(3),
+        attempt_count: 1,
+      },
+      {
+        id: "item-b",
+        row_index: 5,
+        city_code: "01101",
+        product_id: "p-b",
+        product_json: createProductJson(3),
+        attempt_count: 1,
+      },
+    ];
+
+    let active = 0;
+    let maxActive = 0;
+    embedOrReuseImageEmbedding.mockImplementation(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      active -= 1;
+      return {
+        vector: [0.1, 0.2],
+        byteSize: 8,
+        durationMs: 10,
+        model: "vectorize-test",
+        dim: 2,
+        normalized: true,
+        source: "vectorize_api",
+        reusedFrom: null,
+        downloadDurationMs: 3,
+        apiDurationMs: 7,
+      };
+    });
+
+    getImportJobV2
+      .mockResolvedValueOnce(createVectorJob())
+      .mockResolvedValueOnce({ ...createVectorJob({ status: "running" }), processedCount: 2 });
+    claimPendingItemsV2
+      .mockResolvedValueOnce(pendingItems)
+      .mockResolvedValueOnce([]);
+
+    const req = new Request("http://localhost/api/product-json-import-v2/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId: "job-1",
+        limit: 5,
+        timeBudgetMs: 25_000,
+        vectorizeConcurrency: 5,
+        maxTotalVectorizeInFlight: 3,
+        maxVectorizeHeadImages: 4,
+      }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(maxActive).toBeLessThanOrEqual(3);
   });
 
   it("retries vectorize 429 failures instead of marking the import item failed", async () => {
@@ -353,8 +451,9 @@ describe("POST /api/product-json-import-v2/run", () => {
         items: [],
       })
     );
-    expect(json.itemReports?.[0]?.steps.map((step: { step: string }) => step.step)).toContain(
-      "enqueue_vectorize_tail_empty"
-    );
+    const stepNames = json.itemReports?.[0]?.steps.map((step: { step: string }) => step.step);
+    expect(stepNames).toContain("vectorize_main_download");
+    expect(stepNames).toContain("vectorize_main_api");
+    expect(stepNames).toContain("enqueue_vectorize_tail_empty");
   });
 });
