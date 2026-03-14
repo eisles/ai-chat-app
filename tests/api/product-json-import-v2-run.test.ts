@@ -548,6 +548,59 @@ describe("POST /api/product-json-import-v2/run", () => {
     expect(stepNames).toContain("vectorize_main_queue_wait");
     expect(stepNames).toContain("vectorize_main_download");
     expect(stepNames).toContain("vectorize_main_api");
+    expect(stepNames).toContain("vectorize_main_upsert");
     expect(stepNames).toContain("enqueue_vectorize_tail_empty");
+  });
+
+  it("records stored image reuse steps in debug timings", async () => {
+    const pendingItem = {
+      id: "item-reused",
+      row_index: 7,
+      city_code: "01101",
+      product_id: "p-reused",
+      product_json: createProductJson(0),
+      attempt_count: 1,
+    };
+
+    embedOrReuseImageEmbedding.mockResolvedValue({
+      vector: [0.1, 0.2],
+      byteSize: 8,
+      durationMs: 10,
+      model: "cached-vector",
+      dim: 2,
+      normalized: true,
+      source: "stored_image_url",
+      reusedFrom: {
+        productId: "cached-product",
+        slideIndex: 0,
+      },
+    });
+    getImportJobV2
+      .mockResolvedValueOnce(createVectorJob())
+      .mockResolvedValueOnce({ ...createVectorJob({ status: "running" }), processedCount: 1 });
+    claimPendingItemsV2.mockResolvedValueOnce([pendingItem]).mockResolvedValueOnce([]);
+
+    const req = new Request("http://localhost/api/product-json-import-v2/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId: "job-1",
+        limit: 1,
+        timeBudgetMs: 10_000,
+        debugTimings: true,
+      }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(json.itemReports?.[0]?.steps.map((step: { step: string }) => step.step)).toContain(
+      "vectorize_main_reused"
+    );
+    expect(json.itemReports?.[0]?.steps.map((step: { step: string }) => step.step)).toContain(
+      "vectorize_main_upsert"
+    );
   });
 });

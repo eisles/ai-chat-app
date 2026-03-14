@@ -119,6 +119,7 @@ import {
   markVectorizeTailItemFailure,
   requeueStaleProcessingItemsV2,
   requeueStaleVectorizeTailItems,
+  updateJobStatusV2,
 } from "@/lib/product-json-import-v2";
 import { claimPendingItemsV2 } from "@/lib/product-json-import-v2";
 import { getExistingProductIdsForSources } from "@/lib/image-text-search";
@@ -204,6 +205,16 @@ describe("product-json-import-v2", () => {
     expect(call).toBeTruthy();
     expect(call?.sql).toContain("status = 'processing'");
     expect(call?.sql).toContain("status = 'pending'");
+  });
+
+  it("treats jobs as completed when no pending or processing import items remain", async () => {
+    await updateJobStatusV2("00000000-0000-0000-0000-000000000000");
+    const call = mockState.calls.find((x) =>
+      x.sql.includes("update public.product_import_jobs_v2")
+    );
+    expect(call).toBeTruthy();
+    expect(call?.sql).toContain("status in ('pending', 'processing')");
+    expect(call?.sql).toContain("not exists");
   });
 
   it("bulk-skips items and updates job counters", async () => {

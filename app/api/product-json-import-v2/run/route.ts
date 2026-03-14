@@ -636,13 +636,20 @@ async function processProductItem(options: {
                 ms: embedding.retryWaitDurationMs,
               });
             }
+          } else if (options.debugTimings && embedding.source === "stored_image_url") {
+            steps.push({
+              step: `${stepName}_reused`,
+              ms: 0,
+            });
           }
-          await upsertProductImagesVectorize({
-            productId,
-            cityCode: product.city_code ?? null,
-            imageUrl: item.imageUrl,
-            imageEmbedding: embedding,
-            slideIndex: item.slideIndex,
+          await timeStep(`${stepName}_upsert`, async () => {
+            await upsertProductImagesVectorize({
+              productId,
+              cityCode: product.city_code ?? null,
+              imageUrl: item.imageUrl,
+              imageEmbedding: embedding,
+              slideIndex: item.slideIndex,
+            });
           });
         });
       });

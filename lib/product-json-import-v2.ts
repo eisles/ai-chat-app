@@ -1414,7 +1414,13 @@ export async function updateJobStatusV2(jobId: string) {
   await db`
     update public.product_import_jobs_v2
     set status = case
-      when processed_count >= total_count then 'completed'
+      when processed_count >= total_count
+        or not exists (
+          select 1
+          from public.product_import_items_v2
+          where job_id = ${jobId}
+            and status in ('pending', 'processing')
+        ) then 'completed'
       when status = 'pending' then 'running'
       else status
     end,
@@ -1423,7 +1429,13 @@ export async function updateJobStatusV2(jobId: string) {
       else started_at
     end,
     completed_at = case
-      when processed_count >= total_count then coalesce(completed_at, now())
+      when processed_count >= total_count
+        or not exists (
+          select 1
+          from public.product_import_items_v2
+          where job_id = ${jobId}
+            and status in ('pending', 'processing')
+        ) then coalesce(completed_at, now())
       else completed_at
     end,
     updated_at = now()

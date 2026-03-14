@@ -197,6 +197,13 @@ const UPLOAD_STATE_KEY = "product-json-import-v2-upload";
 const MAX_TAIL_RUN_REQUESTS = 20;
 const MAX_VECTORIZE_CONCURRENCY = 8;
 const VECTORIZE_CONCURRENCY_RECOVERY_RUNS = 3;
+const BASE_RECOMMENDED_VECTORIZE_SETTINGS = {
+  heavyItemConcurrency: 2,
+  vectorizeConcurrency: 3,
+  maxTotalVectorizeInFlight: 4,
+  maxVectorizeHeadImages: 9,
+  autoAdjustVectorizeConcurrency: true,
+} as const;
 
 type CsvRow = Record<string, string>;
 
@@ -255,6 +262,17 @@ function formatBytes(value: number) {
     index += 1;
   }
   return `${size.toFixed(1)}${units[index]}`;
+}
+
+function formatDurationSummary(ms: number) {
+  if (!Number.isFinite(ms) || ms <= 0) return "0ms";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
+function formatPercent(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0%";
+  return `${Math.round(value * 100)}%`;
 }
 
 export default function ProductJsonImportV2Page() {
@@ -604,7 +622,11 @@ export default function ProductJsonImportV2Page() {
         const latestJob = await runBatch();
         const status = await fetchStatus(job.id);
         setConsecutiveRunErrors(0);
-        if (latestJob?.status === "completed") {
+        const queueExhausted =
+          (status.queueStats?.pendingReadyCount ?? 0) === 0 &&
+          (status.queueStats?.pendingDelayedCount ?? 0) === 0 &&
+          (status.queueStats?.processingCount ?? 0) === 0;
+        if (latestJob?.status === "completed" || queueExhausted) {
           setIsRunning(false);
           return;
         }
@@ -1220,6 +1242,148 @@ export default function ProductJsonImportV2Page() {
     const avgMs = Math.floor(totals.reduce((a, b) => a + b, 0) / totals.length);
     return `${(avgMs / 1000).toFixed(2)}s`;
   })();
+  const lastRunVectorizeSummary = (() => {
+    const reports = lastRun?.itemReports ?? [];
+    if (reports.length === 0) return null;
+
+    let queueWaitMs = 0;
+    let retryWaitMs = 0;
+    let apiMs = 0;
+    let upsertMs = 0;
+    let storedReuseCount = 0;
+    let maxQueueWaitMs = 0;
+    let maxApiMs = 0;
+    let maxUpsertMs = 0;
+    let slowUpsertCount = 0;
+
+    for (const report of reports) {
+      for (const step of report.steps) {
+        if (step.step.endsWith("_queue_wait")) {
+          queueWaitMs += step.ms;
+          maxQueueWaitMs = Math.max(maxQueueWaitMs, step.ms);
+          continue;
+        }
+        if (step.step.endsWith("_retry_wait")) {
+          retryWaitMs += step.ms;
+          continue;
+        }
+        if (step.step.endsWith("_api")) {
+          apiMs += step.ms;
+          maxApiMs = Math.max(maxApiMs, step.ms);
+          continue;
+        }
+        if (step.step.endsWith("_upsert")) {
+          upsertMs += step.ms;
+          maxUpsertMs = Math.max(maxUpsertMs, step.ms);
+          if (step.ms > 250) slowUpsertCount += 1;
+          continue;
+        }
+        if (step.step.endsWith("_reused")) {
+          storedReuseCount += 1;
+        }
+      }
+    }
+
+    const vectorizeObservedMs = queueWaitMs + retryWaitMs + apiMs;
+
+    return {
+      queueWaitMs,
+      retryWaitMs,
+      apiMs,
+      upsertMs,
+      maxQueueWaitMs,
+      maxApiMs,
+      maxUpsertMs,
+      slowUpsertCount,
+      vectorizeObservedMs,
+      totalObservedMs: vectorizeObservedMs + upsertMs,
+      storedReuseCount,
+    };
+  })();
+  const shouldRecommendLowerHeadImages = (() => {
+    if (!lastRunVectorizeSummary) return false;
+    const { retryWaitMs, vectorizeObservedMs } = lastRunVectorizeSummary;
+    if (vectorizeObservedMs <= 0) return false;
+    const retryShare = retryWaitMs / vectorizeObservedMs;
+    return retryWaitMs >= 1000 && retryShare >= 0.15;
+  })();
+  const recommendedVectorizeSettings = {
+    ...BASE_RECOMMENDED_VECTORIZE_SETTINGS,
+    maxVectorizeHeadImages: shouldRecommendLowerHeadImages
+      ? 6
+      : BASE_RECOMMENDED_VECTORIZE_SETTINGS.maxVectorizeHeadImages,
+  };
+  const lastRunRetryWaitWarning = (() => {
+    if (!lastRunVectorizeSummary) return null;
+    const { retryWaitMs, vectorizeObservedMs } = lastRunVectorizeSummary;
+    if (vectorizeObservedMs <= 0) return null;
+    const retryShare = retryWaitMs / vectorizeObservedMs;
+    if (!shouldRecommendLowerHeadImages) return null;
+
+    const recommendation = autoAdjustVectorizeConcurrency
+      ? `vectorize並列か商品並列を1段下げるか、初回ベクトル画像数を${recommendedVectorizeSettings.maxVectorizeHeadImages}に下げて tail へ逃がすのが妥当です。`
+      : "vectorize並列か商品並列を1段下げるか、自動調整をONに戻して 429 抑制を優先してください。";
+
+    return `retry_wait が ${formatDurationSummary(retryWaitMs)} (${formatPercent(
+      retryShare
+    )}) と高めです。Vectorize API 側のスロットリングを short retry で吸収しています。${recommendation}`;
+  })();
+  const applyRecommendedVectorizeSettings = () => {
+    setHeavyItemConcurrency(String(recommendedVectorizeSettings.heavyItemConcurrency));
+    applyManualVectorizeConcurrency(
+      String(recommendedVectorizeSettings.vectorizeConcurrency)
+    );
+    setMaxTotalVectorizeInFlight(
+      String(recommendedVectorizeSettings.maxTotalVectorizeInFlight)
+    );
+    setMaxVectorizeHeadImages(
+      String(recommendedVectorizeSettings.maxVectorizeHeadImages)
+    );
+    setAutoAdjustVectorizeConcurrency(
+      recommendedVectorizeSettings.autoAdjustVectorizeConcurrency
+    );
+    vectorizeConcurrencyRecoveryStreakRef.current = 0;
+  };
+  const recommendedVectorizeDiffs = (() => {
+    const diffs: string[] = [];
+    if (heavyItemConcurrency !== String(recommendedVectorizeSettings.heavyItemConcurrency)) {
+      diffs.push(
+        `商品並列 ${heavyItemConcurrency} -> ${recommendedVectorizeSettings.heavyItemConcurrency}`
+      );
+    }
+    if (vectorizeConcurrency !== String(recommendedVectorizeSettings.vectorizeConcurrency)) {
+      diffs.push(
+        `vectorize並列 ${vectorizeConcurrency} -> ${recommendedVectorizeSettings.vectorizeConcurrency}`
+      );
+    }
+    if (
+      maxTotalVectorizeInFlight !==
+      String(recommendedVectorizeSettings.maxTotalVectorizeInFlight)
+    ) {
+      diffs.push(
+        `総vectorize上限 ${maxTotalVectorizeInFlight} -> ${recommendedVectorizeSettings.maxTotalVectorizeInFlight}`
+      );
+    }
+    if (
+      maxVectorizeHeadImages !==
+      String(recommendedVectorizeSettings.maxVectorizeHeadImages)
+    ) {
+      diffs.push(
+        `初回ベクトル画像数 ${maxVectorizeHeadImages} -> ${recommendedVectorizeSettings.maxVectorizeHeadImages}`
+      );
+    }
+    if (
+      autoAdjustVectorizeConcurrency !==
+      recommendedVectorizeSettings.autoAdjustVectorizeConcurrency
+    ) {
+      diffs.push(
+        `自動調整 ${autoAdjustVectorizeConcurrency ? "ON" : "OFF"} -> ${
+          recommendedVectorizeSettings.autoAdjustVectorizeConcurrency ? "ON" : "OFF"
+        }`
+      );
+    }
+    return diffs;
+  })();
   const estimateLabel = (() => {
     if (!job) return "-";
     const totalCount = Math.max(0, job.totalCount);
@@ -1674,6 +1838,95 @@ export default function ProductJsonImportV2Page() {
                 released={lastRun.released ?? 0} / http429={lastRun.http429Count ?? 0}
                 {" / "}effective_vectorize={lastRun.effectiveVectorizeConcurrency ?? "-"}
                 {" / "}timeBudgetMs={lastRun.timeBudgetMs ?? "-"}
+              </div>
+              {lastRunVectorizeSummary && (
+                <div className="mt-1 text-xs text-muted-foreground">
+                  queue_wait合計={formatDurationSummary(lastRunVectorizeSummary.queueWaitMs)}
+                  {" / "}retry_wait合計=
+                  {formatDurationSummary(lastRunVectorizeSummary.retryWaitMs)}
+                  {" / "}api合計={formatDurationSummary(lastRunVectorizeSummary.apiMs)}
+                  {" / "}upsert合計=
+                  {formatDurationSummary(lastRunVectorizeSummary.upsertMs)}
+                  {" / "}stored_image_url再利用=
+                  {lastRunVectorizeSummary.storedReuseCount}
+                </div>
+              )}
+              {lastRunVectorizeSummary && (
+                <div className="mt-1 text-xs text-muted-foreground">
+                  max queue_wait=
+                  {formatDurationSummary(lastRunVectorizeSummary.maxQueueWaitMs)}
+                  {" / "}max api=
+                  {formatDurationSummary(lastRunVectorizeSummary.maxApiMs)}
+                  {" / "}max upsert=
+                  {formatDurationSummary(lastRunVectorizeSummary.maxUpsertMs)}
+                  {" / "}upsert 250ms超=
+                  {lastRunVectorizeSummary.slowUpsertCount}件
+                </div>
+              )}
+              {lastRunVectorizeSummary &&
+                lastRunVectorizeSummary.storedReuseCount > 0 && (
+                  <div className="mt-2 rounded-md border border-emerald-300/60 bg-emerald-50 px-2 py-2 text-xs text-emerald-900">
+                    stored_image_url 再利用が {lastRunVectorizeSummary.storedReuseCount} 件ありました。
+                    既存 embedding の再利用が効いています。
+                  </div>
+                )}
+              {lastRunVectorizeSummary && lastRunVectorizeSummary.totalObservedMs > 0 && (
+                <div className="mt-1 text-xs text-muted-foreground">
+                  割合: queue={formatPercent(
+                    lastRunVectorizeSummary.queueWaitMs /
+                      lastRunVectorizeSummary.totalObservedMs
+                  )}
+                  {" / "}retry={formatPercent(
+                    lastRunVectorizeSummary.retryWaitMs /
+                      lastRunVectorizeSummary.totalObservedMs
+                  )}
+                  {" / "}api={formatPercent(
+                    lastRunVectorizeSummary.apiMs /
+                      lastRunVectorizeSummary.totalObservedMs
+                  )}
+                  {" / "}upsert={formatPercent(
+                    lastRunVectorizeSummary.upsertMs /
+                      lastRunVectorizeSummary.totalObservedMs
+                  )}
+                </div>
+              )}
+              {lastRunRetryWaitWarning && (
+                <div className="mt-2 rounded-md border border-amber-300/60 bg-amber-50 px-2 py-2 text-xs text-amber-900">
+                  {lastRunRetryWaitWarning}
+                </div>
+              )}
+              <div className="mt-2 rounded-md border bg-background px-2 py-2 text-xs text-muted-foreground">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    今の推奨設定値:
+                    {" "}商品並列={recommendedVectorizeSettings.heavyItemConcurrency}
+                    {" / "}vectorize並列={recommendedVectorizeSettings.vectorizeConcurrency}
+                    {" / "}総vectorize上限=
+                    {recommendedVectorizeSettings.maxTotalVectorizeInFlight}
+                    {" / "}初回ベクトル画像数=
+                    {recommendedVectorizeSettings.maxVectorizeHeadImages}
+                    {" / "}自動調整=
+                    {recommendedVectorizeSettings.autoAdjustVectorizeConcurrency ? "ON" : "OFF"}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="h-7 px-2 text-[11px]"
+                    onClick={applyRecommendedVectorizeSettings}
+                  >
+                    推奨設定を反映
+                  </Button>
+                </div>
+                {shouldRecommendLowerHeadImages && (
+                  <div className="mt-2 text-[11px] text-amber-700">
+                    retry_wait が高いため、初回ベクトル画像数の推奨値を 6 に下げています。
+                  </div>
+                )}
+                {recommendedVectorizeDiffs.length > 0 && (
+                  <div className="mt-2 text-[11px] text-amber-700">
+                    現在値との差分: {recommendedVectorizeDiffs.join(" / ")}
+                  </div>
+                )}
               </div>
             </div>
           )}
