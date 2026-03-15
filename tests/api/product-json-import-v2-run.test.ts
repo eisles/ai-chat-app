@@ -518,6 +518,7 @@ describe("POST /api/product-json-import-v2/run", () => {
         limit: 1,
         timeBudgetMs: 10_000,
         maxVectorizeHeadImages: 9,
+        vectorizeStartIntervalMs: 0,
         debugTimings: true,
       }),
     });

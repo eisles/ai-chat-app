@@ -49,6 +49,7 @@ const THROTTLE_RETRY_AFTER_SECONDS = 180;
 const STALE_PROCESSING_SECONDS = 120;
 const HEAVY_WORK_MIN_REMAINING_MS = 6000;
 const VECTORIZE_TASK_START_INTERVAL_MS = 150;
+const MAX_VECTORIZE_TASK_START_INTERVAL_MS = 1000;
 
 const CAPTION_TEXT_SOURCES = [
   "image_caption",
@@ -112,6 +113,7 @@ type RunPayload = {
   textConcurrency?: unknown;
   captionConcurrency?: unknown;
   vectorizeConcurrency?: unknown;
+  vectorizeStartIntervalMs?: unknown;
 };
 
 function lowerConcurrencyOn429(current: number, errorCode: string): number {
@@ -131,6 +133,25 @@ function parseTimeBudgetMs(value: unknown) {
     return Math.max(1000, Math.min(25_000, Math.floor(value)));
   }
   return DEFAULT_TIME_BUDGET_MS;
+}
+
+function parseVectorizeStartIntervalMs(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(
+      0,
+      Math.min(MAX_VECTORIZE_TASK_START_INTERVAL_MS, Math.floor(value))
+    );
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return Math.max(
+        0,
+        Math.min(MAX_VECTORIZE_TASK_START_INTERVAL_MS, Math.floor(parsed))
+      );
+    }
+  }
+  return VECTORIZE_TASK_START_INTERVAL_MS;
 }
 
 function parseMaxVectorizeHeadImages(value: unknown) {
@@ -403,6 +424,7 @@ async function processProductItem(options: {
   captionImageInput: "url" | "data_url";
   captionConcurrency: number;
   vectorizeConcurrency: number;
+  vectorizeStartIntervalMs: number;
   maxVectorizeHeadImages: number;
   vectorizeSemaphore: { use<T>(fn: () => Promise<T>): Promise<T> };
   knownProductJsonExists?: boolean;
@@ -656,7 +678,7 @@ async function processProductItem(options: {
 
       await timeStep("vectorize_images_total", async () => {
         await runWithConcurrency(vectorTasks, options.vectorizeConcurrency, {
-          minStartIntervalMs: VECTORIZE_TASK_START_INTERVAL_MS,
+          minStartIntervalMs: options.vectorizeStartIntervalMs,
         });
       });
 
@@ -815,6 +837,9 @@ export async function POST(req: Request) {
       payload.vectorizeConcurrency,
       VECTORIZE_CONCURRENCY,
       MAX_VECTORIZE_CONCURRENCY
+    );
+    const vectorizeStartIntervalMs = parseVectorizeStartIntervalMs(
+      payload.vectorizeStartIntervalMs
     );
     const heavyItemConcurrency = parseConcurrencyOverride(
       payload.heavyItemConcurrency,
@@ -984,6 +1009,7 @@ export async function POST(req: Request) {
               captionImageInput: job.captionImageInput,
               captionConcurrency,
               vectorizeConcurrency: currentVectorizeConcurrency,
+              vectorizeStartIntervalMs,
               maxVectorizeHeadImages,
               vectorizeSemaphore,
               knownProductJsonExists: item.product_id
@@ -1177,6 +1203,7 @@ export async function POST(req: Request) {
                 captionImageInput: job.captionImageInput,
                 captionConcurrency,
                 vectorizeConcurrency: currentVectorizeConcurrency,
+                vectorizeStartIntervalMs,
                 maxVectorizeHeadImages,
                 vectorizeSemaphore,
                 knownProductJsonExists: item.product_id

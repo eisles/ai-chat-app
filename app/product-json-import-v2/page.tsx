@@ -202,6 +202,7 @@ const BASE_RECOMMENDED_VECTORIZE_SETTINGS = {
   vectorizeConcurrency: 3,
   maxTotalVectorizeInFlight: 4,
   maxVectorizeHeadImages: 9,
+  vectorizeStartIntervalMs: 100,
   autoAdjustVectorizeConcurrency: true,
 } as const;
 
@@ -275,6 +276,14 @@ function formatPercent(value: number) {
   return `${Math.round(value * 100)}%`;
 }
 
+function deriveRecommendedVectorizeConcurrency(maxTotalVectorizeInFlight: number) {
+  if (maxTotalVectorizeInFlight <= 2) return 1;
+  if (maxTotalVectorizeInFlight <= 3) return 2;
+  if (maxTotalVectorizeInFlight <= 5) return 3;
+  if (maxTotalVectorizeInFlight <= 7) return 4;
+  return 5;
+}
+
 export default function ProductJsonImportV2Page() {
   const [file, setFile] = useState<File | null>(null);
   const [existingBehavior, setExistingBehavior] =
@@ -293,6 +302,7 @@ export default function ProductJsonImportV2Page() {
   const [captionConcurrency, setCaptionConcurrency] = useState("4");
   const [vectorizeConcurrency, setVectorizeConcurrency] = useState("2");
   const [maxTotalVectorizeInFlight, setMaxTotalVectorizeInFlight] = useState("5");
+  const [vectorizeStartIntervalMs, setVectorizeStartIntervalMs] = useState("150");
   const [autoAdjustVectorizeConcurrency, setAutoAdjustVectorizeConcurrency] =
     useState(true);
   const [debugTimings, setDebugTimings] = useState(true);
@@ -560,6 +570,7 @@ export default function ProductJsonImportV2Page() {
         captionConcurrency: parseInt(captionConcurrency, 10) || 4,
         vectorizeConcurrency: parseInt(vectorizeConcurrency, 10) || 2,
         maxTotalVectorizeInFlight: parseInt(maxTotalVectorizeInFlight, 10) || 5,
+        vectorizeStartIntervalMs: Math.max(0, parseInt(vectorizeStartIntervalMs, 10) || 0),
         maxVectorizeHeadImages: parseInt(maxVectorizeHeadImages, 10) || 4,
         autoAdjustVectorizeConcurrency,
       }),
@@ -1088,6 +1099,10 @@ export default function ProductJsonImportV2Page() {
           timeBudgetMs: parseInt(timeBudgetMs, 10) || 25_000,
           vectorizeConcurrency:
             effectiveVectorizeConcurrency ?? (parseInt(vectorizeConcurrency, 10) || 2),
+          vectorizeStartIntervalMs: Math.max(
+            0,
+            parseInt(vectorizeStartIntervalMs, 10) || 0
+          ),
           autoAdjustVectorizeConcurrency,
         }),
       });
@@ -1307,8 +1322,28 @@ export default function ProductJsonImportV2Page() {
     const retryShare = retryWaitMs / vectorizeObservedMs;
     return retryWaitMs >= 1000 && retryShare >= 0.15;
   })();
+  const shouldRecommendHigherStartInterval = (() => {
+    if (!lastRunVectorizeSummary) return false;
+    if ((lastRun?.http429Count ?? 0) > 0) return true;
+    const { retryWaitMs, vectorizeObservedMs } = lastRunVectorizeSummary;
+    if (vectorizeObservedMs <= 0) return false;
+    const retryShare = retryWaitMs / vectorizeObservedMs;
+    return retryWaitMs >= 1000 && retryShare >= 0.15;
+  })();
+  const configuredRecommendedMaxTotalVectorizeInFlight = (() => {
+    const parsed = Number.parseInt(maxTotalVectorizeInFlight, 10);
+    if (!Number.isFinite(parsed)) {
+      return BASE_RECOMMENDED_VECTORIZE_SETTINGS.maxTotalVectorizeInFlight;
+    }
+    return Math.max(1, Math.min(16, parsed));
+  })();
   const recommendedVectorizeSettings = {
     ...BASE_RECOMMENDED_VECTORIZE_SETTINGS,
+    maxTotalVectorizeInFlight: configuredRecommendedMaxTotalVectorizeInFlight,
+    vectorizeConcurrency: deriveRecommendedVectorizeConcurrency(
+      configuredRecommendedMaxTotalVectorizeInFlight
+    ),
+    vectorizeStartIntervalMs: shouldRecommendHigherStartInterval ? 150 : 100,
     maxVectorizeHeadImages: shouldRecommendLowerHeadImages
       ? 6
       : BASE_RECOMMENDED_VECTORIZE_SETTINGS.maxVectorizeHeadImages,
@@ -1336,6 +1371,9 @@ export default function ProductJsonImportV2Page() {
     setMaxTotalVectorizeInFlight(
       String(recommendedVectorizeSettings.maxTotalVectorizeInFlight)
     );
+    setVectorizeStartIntervalMs(
+      String(recommendedVectorizeSettings.vectorizeStartIntervalMs)
+    );
     setMaxVectorizeHeadImages(
       String(recommendedVectorizeSettings.maxVectorizeHeadImages)
     );
@@ -1362,6 +1400,14 @@ export default function ProductJsonImportV2Page() {
     ) {
       diffs.push(
         `総vectorize上限 ${maxTotalVectorizeInFlight} -> ${recommendedVectorizeSettings.maxTotalVectorizeInFlight}`
+      );
+    }
+    if (
+      vectorizeStartIntervalMs !==
+      String(recommendedVectorizeSettings.vectorizeStartIntervalMs)
+    ) {
+      diffs.push(
+        `開始間隔 ${vectorizeStartIntervalMs}ms -> ${recommendedVectorizeSettings.vectorizeStartIntervalMs}ms`
       );
     }
     if (
@@ -1903,6 +1949,8 @@ export default function ProductJsonImportV2Page() {
                     {" / "}vectorize並列={recommendedVectorizeSettings.vectorizeConcurrency}
                     {" / "}総vectorize上限=
                     {recommendedVectorizeSettings.maxTotalVectorizeInFlight}
+                    {" / "}開始間隔=
+                    {recommendedVectorizeSettings.vectorizeStartIntervalMs}ms
                     {" / "}初回ベクトル画像数=
                     {recommendedVectorizeSettings.maxVectorizeHeadImages}
                     {" / "}自動調整=
@@ -1920,6 +1968,11 @@ export default function ProductJsonImportV2Page() {
                 {shouldRecommendLowerHeadImages && (
                   <div className="mt-2 text-[11px] text-amber-700">
                     retry_wait が高いため、初回ベクトル画像数の推奨値を 6 に下げています。
+                  </div>
+                )}
+                {shouldRecommendHigherStartInterval && (
+                  <div className="mt-2 text-[11px] text-amber-700">
+                    retry_wait または http429 が高いため、開始間隔の推奨値を 150ms に戻しています。
                   </div>
                 )}
                 {recommendedVectorizeDiffs.length > 0 && (
@@ -2061,6 +2114,27 @@ export default function ProductJsonImportV2Page() {
                 max="16"
                 value={maxTotalVectorizeInFlight}
                 onChange={(e) => setMaxTotalVectorizeInFlight(e.target.value)}
+                className="w-24 rounded-md border bg-background px-3 py-2 text-sm"
+                disabled={!job.doImageVectors}
+              />
+            </div>
+            <div className="space-y-1">
+              <label
+                htmlFor="vectorizeStartIntervalMs"
+                className="text-xs text-muted-foreground"
+              >
+                vectorize開始間隔(ms)
+              </label>
+              <div className="text-[11px] text-muted-foreground">
+                画像ベクトル化タスクの開始を何msずつずらすか。0 なら間隔なし、上げると 429 は減りやすい代わりに遅くなります。
+              </div>
+              <input
+                id="vectorizeStartIntervalMs"
+                type="number"
+                min="0"
+                max="1000"
+                value={vectorizeStartIntervalMs}
+                onChange={(e) => setVectorizeStartIntervalMs(e.target.value)}
                 className="w-24 rounded-md border bg-background px-3 py-2 text-sm"
                 disabled={!job.doImageVectors}
               />

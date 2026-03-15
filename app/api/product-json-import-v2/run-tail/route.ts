@@ -22,6 +22,7 @@ const THROTTLE_RETRY_AFTER_SECONDS = 180;
 const VECTOR_TAIL_STALE_SECONDS = 120;
 const MAX_VECTOR_TAIL_CONCURRENCY = 2;
 const VECTORIZE_TASK_START_INTERVAL_MS = 150;
+const MAX_VECTORIZE_TASK_START_INTERVAL_MS = 1000;
 
 function parseConcurrency(value: string | undefined, fallback: number, max: number) {
   const parsed = value ? Number(value) : NaN;
@@ -50,6 +51,7 @@ type RunTailPayload = {
   timeBudgetMs?: unknown;
   vectorizeConcurrency?: unknown;
   autoAdjustVectorizeConcurrency?: unknown;
+  vectorizeStartIntervalMs?: unknown;
 };
 
 function parseConcurrencyOverride(value: unknown, fallback: number, max: number): number {
@@ -79,6 +81,25 @@ function parseTimeBudgetMs(value: unknown): number {
     return Math.max(1000, Math.min(25_000, Math.floor(value)));
   }
   return DEFAULT_TIME_BUDGET_MS;
+}
+
+function parseVectorizeStartIntervalMs(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(
+      0,
+      Math.min(MAX_VECTORIZE_TASK_START_INTERVAL_MS, Math.floor(value))
+    );
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return Math.max(
+        0,
+        Math.min(MAX_VECTORIZE_TASK_START_INTERVAL_MS, Math.floor(parsed))
+      );
+    }
+  }
+  return VECTORIZE_TASK_START_INTERVAL_MS;
 }
 
 function normalizeErrorMessage(message: string): string {
@@ -233,6 +254,9 @@ export async function POST(req: Request) {
       payload.autoAdjustVectorizeConcurrency,
       true
     );
+    const vectorizeStartIntervalMs = parseVectorizeStartIntervalMs(
+      payload.vectorizeStartIntervalMs
+    );
     const limit = parseLimit(payload.limit);
     const timeBudgetMs = parseTimeBudgetMs(payload.timeBudgetMs);
     const deadline = Date.now() + timeBudgetMs;
@@ -306,7 +330,7 @@ export async function POST(req: Request) {
           }
         }),
         currentVectorizeConcurrency,
-        { minStartIntervalMs: VECTORIZE_TASK_START_INTERVAL_MS }
+        { minStartIntervalMs: vectorizeStartIntervalMs }
       );
 
       if (batchSaw429) {
