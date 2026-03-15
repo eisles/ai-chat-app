@@ -16,12 +16,13 @@ export const maxDuration = 60;
 
 const DEFAULT_VECTOR_TAIL_LIMIT = 20;
 const DEFAULT_TIME_BUDGET_MS = 25_000;
+const MAX_TIME_BUDGET_MS = 55_000;
 const MAX_RETRY_ATTEMPTS = 5;
 const MAX_RETRY_DELAY_SECONDS = 60;
 const THROTTLE_RETRY_AFTER_SECONDS = 180;
 const VECTOR_TAIL_STALE_SECONDS = 120;
 const MAX_VECTOR_TAIL_CONCURRENCY = 2;
-const VECTORIZE_TASK_START_INTERVAL_MS = 150;
+const VECTORIZE_TASK_START_INTERVAL_MS = 100;
 const MAX_VECTORIZE_TASK_START_INTERVAL_MS = 1000;
 
 function parseConcurrency(value: string | undefined, fallback: number, max: number) {
@@ -78,7 +79,7 @@ function parseLimit(value: unknown): number {
 
 function parseTimeBudgetMs(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.max(1000, Math.min(25_000, Math.floor(value)));
+    return Math.max(1000, Math.min(MAX_TIME_BUDGET_MS, Math.floor(value)));
   }
   return DEFAULT_TIME_BUDGET_MS;
 }

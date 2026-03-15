@@ -19,6 +19,8 @@ import {
 } from "@/components/ui/select";
 import { useEffect, useRef, useState } from "react";
 
+import { cn } from "@/lib/utils";
+
 type ExistingBehavior = "skip" | "delete_then_insert";
 type CaptionImageInputMode = "url" | "data_url";
 
@@ -200,7 +202,7 @@ const VECTORIZE_CONCURRENCY_RECOVERY_RUNS = 3;
 const BASE_RECOMMENDED_VECTORIZE_SETTINGS = {
   heavyItemConcurrency: 2,
   vectorizeConcurrency: 3,
-  maxTotalVectorizeInFlight: 4,
+  maxTotalVectorizeInFlight: 6,
   maxVectorizeHeadImages: 9,
   vectorizeStartIntervalMs: 100,
   autoAdjustVectorizeConcurrency: true,
@@ -294,15 +296,15 @@ export default function ProductJsonImportV2Page() {
   const [captionImageInput, setCaptionImageInput] =
     useState<CaptionImageInputMode>("url");
   const [limit, setLimit] = useState("5");
-  const [timeBudgetMs, setTimeBudgetMs] = useState("10000");
+  const [timeBudgetMs, setTimeBudgetMs] = useState("25000");
   const [avgImageCount, setAvgImageCount] = useState("1");
-  const [maxVectorizeHeadImages, setMaxVectorizeHeadImages] = useState("4");
+  const [maxVectorizeHeadImages, setMaxVectorizeHeadImages] = useState("9");
   const [heavyItemConcurrency, setHeavyItemConcurrency] = useState("2");
   const [textConcurrency, setTextConcurrency] = useState("2");
   const [captionConcurrency, setCaptionConcurrency] = useState("4");
-  const [vectorizeConcurrency, setVectorizeConcurrency] = useState("2");
-  const [maxTotalVectorizeInFlight, setMaxTotalVectorizeInFlight] = useState("5");
-  const [vectorizeStartIntervalMs, setVectorizeStartIntervalMs] = useState("150");
+  const [vectorizeConcurrency, setVectorizeConcurrency] = useState("3");
+  const [maxTotalVectorizeInFlight, setMaxTotalVectorizeInFlight] = useState("6");
+  const [vectorizeStartIntervalMs, setVectorizeStartIntervalMs] = useState("100");
   const [autoAdjustVectorizeConcurrency, setAutoAdjustVectorizeConcurrency] =
     useState(true);
   const [debugTimings, setDebugTimings] = useState(true);
@@ -464,21 +466,42 @@ export default function ProductJsonImportV2Page() {
   };
 
   async function fetchStatus(jobId: string) {
-    const res = await fetch(`/api/product-json-import-v2?jobId=${jobId}`);
+    const res = await fetch(`/api/product-json-import-v2?jobId=${jobId}`, {
+      cache: "no-store",
+    });
     const data = await readJsonResponse<JobResponse>(res);
     if (!data.ok) {
       throw new Error(data.error ?? "ステータス取得に失敗しました");
     }
-    setJob(data.job ?? null);
+
+    const queue = data.queueStats ?? null;
+    const tail = data.tailStats ?? null;
+    const nextJob = data.job
+      ? data.job.status === "completed" &&
+        (queue?.pendingReadyCount ?? 0) === 0 &&
+        (queue?.pendingDelayedCount ?? 0) === 0 &&
+        (queue?.processingCount ?? 0) === 0
+        ? {
+            ...data.job,
+            processedCount: data.job.totalCount,
+            successCount:
+              data.job.totalCount - data.job.failureCount - data.job.skippedCount,
+          }
+        : data.job
+      : null;
+
+    setJob(nextJob);
     setFailedItems(data.failedItems ?? []);
     setProcessingItems(data.processingItems ?? []);
-    setQueueStats(data.queueStats ?? null);
-    setTailStats(data.tailStats ?? null);
-    return data;
+    setQueueStats(queue);
+    setTailStats(tail);
+    return { ...data, job: nextJob };
   }
 
   async function fetchJobs() {
-    const res = await fetch("/api/product-json-import-v2/jobs?limit=30");
+    const res = await fetch("/api/product-json-import-v2/jobs?limit=30", {
+      cache: "no-store",
+    });
     const data = await readJsonResponse<JobsResponse>(res);
     if (!data.ok) {
       throw new Error(data.error ?? "ジョブ一覧の取得に失敗しました");
@@ -539,7 +562,8 @@ export default function ProductJsonImportV2Page() {
     setJobPreviewError((prev) => ({ ...prev, [jobId]: null }));
     try {
       const res = await fetch(
-        `/api/product-json-import-v2/jobs/${jobId}/items?limit=10`
+        `/api/product-json-import-v2/jobs/${jobId}/items?limit=10`,
+        { cache: "no-store" }
       );
       const data = await readJsonResponse<JobItemsResponse>(res);
       if (!data.ok) {
@@ -563,15 +587,15 @@ export default function ProductJsonImportV2Page() {
       body: JSON.stringify({
         jobId: job.id,
         limit: parseInt(limit, 10) || 5,
-        timeBudgetMs: parseInt(timeBudgetMs, 10) || 10000,
+        timeBudgetMs: parseInt(timeBudgetMs, 10) || 25000,
         debugTimings,
         heavyItemConcurrency: parseInt(heavyItemConcurrency, 10) || 2,
         textConcurrency: parseInt(textConcurrency, 10) || 2,
         captionConcurrency: parseInt(captionConcurrency, 10) || 4,
-        vectorizeConcurrency: parseInt(vectorizeConcurrency, 10) || 2,
-        maxTotalVectorizeInFlight: parseInt(maxTotalVectorizeInFlight, 10) || 5,
+        vectorizeConcurrency: parseInt(vectorizeConcurrency, 10) || 3,
+        maxTotalVectorizeInFlight: parseInt(maxTotalVectorizeInFlight, 10) || 6,
         vectorizeStartIntervalMs: Math.max(0, parseInt(vectorizeStartIntervalMs, 10) || 0),
-        maxVectorizeHeadImages: parseInt(maxVectorizeHeadImages, 10) || 4,
+        maxVectorizeHeadImages: parseInt(maxVectorizeHeadImages, 10) || 9,
         autoAdjustVectorizeConcurrency,
       }),
     });
@@ -1322,13 +1346,15 @@ export default function ProductJsonImportV2Page() {
     const retryShare = retryWaitMs / vectorizeObservedMs;
     return retryWaitMs >= 1000 && retryShare >= 0.15;
   })();
-  const shouldRecommendHigherStartInterval = (() => {
-    if (!lastRunVectorizeSummary) return false;
-    if ((lastRun?.http429Count ?? 0) > 0) return true;
-    const { retryWaitMs, vectorizeObservedMs } = lastRunVectorizeSummary;
+  const shouldRecommendHigherStartInterval = shouldRecommendLowerHeadImages;
+  const shouldRecommendMuchHigherStartInterval = (lastRun?.http429Count ?? 0) > 0;
+  const shouldStronglyWarnStartInterval = (() => {
+    if (!lastRunVectorizeSummary || !shouldRecommendHigherStartInterval) return false;
+    if (shouldRecommendMuchHigherStartInterval) return true;
+    const { queueWaitMs, vectorizeObservedMs } = lastRunVectorizeSummary;
     if (vectorizeObservedMs <= 0) return false;
-    const retryShare = retryWaitMs / vectorizeObservedMs;
-    return retryWaitMs >= 1000 && retryShare >= 0.15;
+    const queueShare = queueWaitMs / vectorizeObservedMs;
+    return queueShare <= 0.1;
   })();
   const configuredRecommendedMaxTotalVectorizeInFlight = (() => {
     const parsed = Number.parseInt(maxTotalVectorizeInFlight, 10);
@@ -1343,7 +1369,11 @@ export default function ProductJsonImportV2Page() {
     vectorizeConcurrency: deriveRecommendedVectorizeConcurrency(
       configuredRecommendedMaxTotalVectorizeInFlight
     ),
-    vectorizeStartIntervalMs: shouldRecommendHigherStartInterval ? 150 : 100,
+    vectorizeStartIntervalMs: shouldRecommendMuchHigherStartInterval
+      ? 150
+      : shouldRecommendHigherStartInterval
+        ? 120
+        : 100,
     maxVectorizeHeadImages: shouldRecommendLowerHeadImages
       ? 6
       : BASE_RECOMMENDED_VECTORIZE_SETTINGS.maxVectorizeHeadImages,
@@ -1355,9 +1385,17 @@ export default function ProductJsonImportV2Page() {
     const retryShare = retryWaitMs / vectorizeObservedMs;
     if (!shouldRecommendLowerHeadImages) return null;
 
-    const recommendation = autoAdjustVectorizeConcurrency
-      ? `vectorize並列か商品並列を1段下げるか、初回ベクトル画像数を${recommendedVectorizeSettings.maxVectorizeHeadImages}に下げて tail へ逃がすのが妥当です。`
-      : "vectorize並列か商品並列を1段下げるか、自動調整をONに戻して 429 抑制を優先してください。";
+    const recommendation = (() => {
+      if (shouldStronglyWarnStartInterval) {
+        return autoAdjustVectorizeConcurrency
+          ? `queue_wait は低いのに retry_wait が高いため、開始間隔をまず ${recommendedVectorizeSettings.vectorizeStartIntervalMs}ms 以上へ戻してください。その上で初回ベクトル画像数を${recommendedVectorizeSettings.maxVectorizeHeadImages}に下げて tail へ逃がすのが妥当です。`
+          : `queue_wait は低いのに retry_wait が高いため、開始間隔をまず ${recommendedVectorizeSettings.vectorizeStartIntervalMs}ms 以上へ戻してください。必要なら自動調整をONに戻して 429 抑制を優先してください。`;
+      }
+
+      return autoAdjustVectorizeConcurrency
+        ? `vectorize並列か商品並列を1段下げるか、初回ベクトル画像数を${recommendedVectorizeSettings.maxVectorizeHeadImages}に下げて tail へ逃がすのが妥当です。`
+        : "vectorize並列か商品並列を1段下げるか、自動調整をONに戻して 429 抑制を優先してください。";
+    })();
 
     return `retry_wait が ${formatDurationSummary(retryWaitMs)} (${formatPercent(
       retryShare
@@ -1937,7 +1975,14 @@ export default function ProductJsonImportV2Page() {
                 </div>
               )}
               {lastRunRetryWaitWarning && (
-                <div className="mt-2 rounded-md border border-amber-300/60 bg-amber-50 px-2 py-2 text-xs text-amber-900">
+                <div
+                  className={cn(
+                    "mt-2 rounded-md border px-2 py-2 text-xs",
+                    shouldStronglyWarnStartInterval
+                      ? "border-red-300/60 bg-red-50 text-red-900"
+                      : "border-amber-300/60 bg-amber-50 text-amber-900"
+                  )}
+                >
                   {lastRunRetryWaitWarning}
                 </div>
               )}
@@ -1970,9 +2015,15 @@ export default function ProductJsonImportV2Page() {
                     retry_wait が高いため、初回ベクトル画像数の推奨値を 6 に下げています。
                   </div>
                 )}
-                {shouldRecommendHigherStartInterval && (
+                {shouldRecommendMuchHigherStartInterval && (
                   <div className="mt-2 text-[11px] text-amber-700">
-                    retry_wait または http429 が高いため、開始間隔の推奨値を 150ms に戻しています。
+                    http429 が出ているため、開始間隔の推奨値を 150ms に戻しています。
+                  </div>
+                )}
+                {!shouldRecommendMuchHigherStartInterval &&
+                  shouldRecommendHigherStartInterval && (
+                  <div className="mt-2 text-[11px] text-amber-700">
+                    retry_wait が高いため、開始間隔の推奨値を 120ms に上げています。
                   </div>
                 )}
                 {recommendedVectorizeDiffs.length > 0 && (
@@ -1990,7 +2041,7 @@ export default function ProductJsonImportV2Page() {
                 limit
               </label>
               <div className="text-[11px] text-muted-foreground">
-                1回の実行で拾う件数（大きいほど一回の処理が重くなります）
+                1回の実行で拾う件数（大きいほど一回の処理が重くなります）。画像ジョブでは実効件数は `商品並列` に制限されます。
               </div>
               <input
                 id="limit"
@@ -2025,13 +2076,13 @@ export default function ProductJsonImportV2Page() {
                 timeBudgetMs
               </label>
               <div className="text-[11px] text-muted-foreground">
-                1回の実行で使う時間（ms）。Vercelは25,000程度推奨。
+                1回の実行で使う時間（ms）。Vercelは25,000程度推奨ですが、必要なら55,000まで指定できます。
               </div>
               <input
                 id="timeBudgetMs"
                 type="number"
                 min="1000"
-                max="25000"
+                max="55000"
                 value={timeBudgetMs}
                 onChange={(e) => setTimeBudgetMs(e.target.value)}
                 className="w-28 rounded-md border bg-background px-3 py-2 text-sm"

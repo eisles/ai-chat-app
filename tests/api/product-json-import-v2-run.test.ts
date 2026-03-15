@@ -155,6 +155,7 @@ describe("POST /api/product-json-import-v2/run", () => {
         limit: 1,
         timeBudgetMs: 10_000,
         vectorizeConcurrency: 2,
+        maxVectorizeHeadImages: 4,
       }),
     });
 
@@ -382,6 +383,7 @@ describe("POST /api/product-json-import-v2/run", () => {
         jobId: "job-1",
         limit: 1,
         timeBudgetMs: 10_000,
+        vectorizeConcurrency: 2,
       }),
     });
 

@@ -40,7 +40,8 @@ const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 
 const DEFAULT_LIMIT = 5;
 const DEFAULT_TIME_BUDGET_MS = 10_000;
-const DEFAULT_MAX_VECTORIZE_HEAD_IMAGES = 4;
+const MAX_TIME_BUDGET_MS = 55_000;
+const DEFAULT_MAX_VECTORIZE_HEAD_IMAGES = 9;
 const DEFAULT_HEAVY_ITEM_CONCURRENCY = 2;
 const MAX_HEAVY_ITEM_CONCURRENCY = 4;
 const MAX_RETRY_ATTEMPTS = 5;
@@ -48,7 +49,7 @@ const MAX_RETRY_DELAY_SECONDS = 60;
 const THROTTLE_RETRY_AFTER_SECONDS = 180;
 const STALE_PROCESSING_SECONDS = 120;
 const HEAVY_WORK_MIN_REMAINING_MS = 6000;
-const VECTORIZE_TASK_START_INTERVAL_MS = 150;
+const VECTORIZE_TASK_START_INTERVAL_MS = 100;
 const MAX_VECTORIZE_TASK_START_INTERVAL_MS = 1000;
 
 const CAPTION_TEXT_SOURCES = [
@@ -83,12 +84,12 @@ const TEXT_CONCURRENCY = parseConcurrency(
 const MAX_VECTORIZE_CONCURRENCY = 8;
 const MAX_TOTAL_VECTORIZE_IN_FLIGHT = parseConcurrency(
   process.env.PRODUCT_IMPORT_V2_MAX_TOTAL_VECTORIZE_IN_FLIGHT,
-  5,
+  6,
   16
 );
 const VECTORIZE_CONCURRENCY = parseConcurrency(
   process.env.PRODUCT_IMPORT_V2_VECTORIZE_CONCURRENCY,
-  2,
+  3,
   MAX_VECTORIZE_CONCURRENCY
 );
 
@@ -130,7 +131,7 @@ function parseLimit(value: unknown) {
 
 function parseTimeBudgetMs(value: unknown) {
   if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.max(1000, Math.min(25_000, Math.floor(value)));
+    return Math.max(1000, Math.min(MAX_TIME_BUDGET_MS, Math.floor(value)));
   }
   return DEFAULT_TIME_BUDGET_MS;
 }
