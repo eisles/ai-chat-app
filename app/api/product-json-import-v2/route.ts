@@ -4,6 +4,7 @@ import {
   createImportJobV2,
   CAPTION_IMAGE_INPUT_MODES,
   getQueueStatsV2,
+  getScopedImportSummaryV2,
   getFailedItemsV2,
   getImportJobV2,
   getProcessingItemsV2,
@@ -173,6 +174,20 @@ function parseRequiredNumber(value: unknown, label: string) {
     throw new ApiError(`${label}が不正です`, 400);
   }
   return Math.max(0, Math.floor(parsed));
+}
+
+function parseOptionalInt(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  const normalized = Math.floor(parsed);
+  return normalized >= 1 ? normalized : null;
+}
+
+function parseOptionalString(value: string | null): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
 }
 
 function parseJsonItem(value: unknown): JsonItem {
@@ -363,6 +378,19 @@ export async function GET(req: Request) {
   if (!jobId) {
     return Response.json({ ok: false, error: "jobIdが必要です" }, { status: 400 });
   }
+  const rowIndexFrom = parseOptionalInt(searchParams.get("rowIndexFrom"));
+  const parsedRowIndexTo = parseOptionalInt(searchParams.get("rowIndexTo"));
+  const filters = {
+    rowIndexFrom,
+    rowIndexTo:
+      rowIndexFrom !== null &&
+      parsedRowIndexTo !== null &&
+      parsedRowIndexTo < rowIndexFrom
+        ? rowIndexFrom
+        : parsedRowIndexTo,
+    cityCode: parseOptionalString(searchParams.get("cityCode")),
+    productId: parseOptionalString(searchParams.get("productId")),
+  };
   const job = await getImportJobV2(jobId);
   if (!job) {
     return Response.json({ ok: false, error: "jobが見つかりません" }, { status: 404 });
@@ -371,6 +399,7 @@ export async function GET(req: Request) {
   const processingItems = await getProcessingItemsV2(jobId, 5);
   const queueStats = await getQueueStatsV2(jobId);
   const tailStats = await getVectorizeTailStats(jobId);
+  const targetSummary = await getScopedImportSummaryV2({ jobId, filters });
   return Response.json({
     ok: true,
     job,
@@ -378,6 +407,7 @@ export async function GET(req: Request) {
     processingItems,
     queueStats,
     tailStats,
+    targetSummary,
   });
 }
 

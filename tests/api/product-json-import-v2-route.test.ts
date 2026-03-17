@@ -4,6 +4,7 @@ const getFailedItemsV2 = vi.fn();
 const getImportJobV2 = vi.fn();
 const getProcessingItemsV2 = vi.fn();
 const getQueueStatsV2 = vi.fn();
+const getScopedImportSummaryV2 = vi.fn();
 const getVectorizeTailStats = vi.fn();
 
 vi.mock("@/lib/product-json-import-v2", () => ({
@@ -12,6 +13,7 @@ vi.mock("@/lib/product-json-import-v2", () => ({
   createImportJobV2: vi.fn(),
   CAPTION_IMAGE_INPUT_MODES: ["url", "data_url"],
   getQueueStatsV2,
+  getScopedImportSummaryV2,
   getFailedItemsV2,
   getImportJobV2,
   getProcessingItemsV2,
@@ -56,6 +58,16 @@ describe("GET /api/product-json-import-v2", () => {
       skippedCount: 0,
       nextRetryAt: null,
     });
+    getScopedImportSummaryV2.mockResolvedValue({
+      totalCount: 10,
+      pendingReadyCount: 0,
+      pendingDelayedCount: 0,
+      processingCount: 0,
+      successCount: 10,
+      failedCount: 0,
+      skippedCount: 0,
+      nextRetryAt: null,
+    });
     getVectorizeTailStats.mockResolvedValue({
       pendingCount: 2,
       processingCount: 1,
@@ -79,6 +91,37 @@ describe("GET /api/product-json-import-v2", () => {
       successCount: 3,
       failedCount: 1,
       nextRetryAt: "2026-03-13T10:00:00.000Z",
+    });
+  });
+
+  it("returns normalized target summary for current run filters", async () => {
+    const req = new Request(
+      "http://localhost/api/product-json-import-v2?jobId=job-1&rowIndexFrom=20&rowIndexTo=10&cityCode=01101&productId=1001"
+    );
+
+    const res = await GET(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(getScopedImportSummaryV2).toHaveBeenCalledWith({
+      jobId: "job-1",
+      filters: {
+        rowIndexFrom: 20,
+        rowIndexTo: 20,
+        cityCode: "01101",
+        productId: "1001",
+      },
+    });
+    expect(json.targetSummary).toEqual({
+      totalCount: 10,
+      pendingReadyCount: 0,
+      pendingDelayedCount: 0,
+      processingCount: 0,
+      successCount: 10,
+      failedCount: 0,
+      skippedCount: 0,
+      nextRetryAt: null,
     });
   });
 });

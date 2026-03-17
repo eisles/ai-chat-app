@@ -24,6 +24,28 @@ const mockState = vi.hoisted(() => {
     ) {
       return [{ id: "00000000-0000-0000-0000-000000000002" }];
     }
+    if (
+      sql.includes("count(*) over() as total_count") &&
+      sql.includes("from public.product_import_items_v2")
+    ) {
+      return [
+        {
+          id: "00000000-0000-0000-0000-000000000020",
+          row_index: 12,
+          city_code: "01101",
+          product_id: "1001",
+          status: "failed",
+          attempt_count: 2,
+          error: "bad row",
+          error_code: "invalid_json",
+          current_step: "vectorize",
+          next_retry_at: null,
+          updated_at: new Date("2026-03-16T06:00:00.000Z"),
+          product_json_preview: "{\"id\":\"1001\"}",
+          total_count: 1,
+        },
+      ];
+    }
     // 簡易モック: `returning id` を使う更新だけ、戻り値が必要なケースがある
     if (
       sql.includes("update public.product_import_items_v2") &&
@@ -113,6 +135,8 @@ import {
   deleteDownstreamForJobV2,
   enqueueVectorizeTailItems,
   getQueueStatsV2,
+  getScopedImportSummaryV2,
+  listImportItemsV2,
   getVectorizeTailStats,
   INSERT_IMPORT_ITEMS_BATCH_SIZE,
   markItemsSkippedBulkV2,
@@ -168,7 +192,10 @@ describe("product-json-import-v2", () => {
   });
 
   it("claims pending items with retry window and attempt_count increment", async () => {
-    await claimPendingItemsV2("00000000-0000-0000-0000-000000000000", 10);
+    await claimPendingItemsV2({
+      jobId: "00000000-0000-0000-0000-000000000000",
+      limit: 10,
+    });
     const updateCall = mockState.calls.find((x) =>
       x.sql.includes("update public.product_import_items_v2")
     );
@@ -181,6 +208,67 @@ describe("product-json-import-v2", () => {
     expect(updateCall?.sql).toContain("attempt_count = attempt_count + 1");
   });
 
+  it("lists import items with filter conditions and total count", async () => {
+    const result = await listImportItemsV2({
+      jobId: "00000000-0000-0000-0000-000000000000",
+      limit: 20,
+      offset: 40,
+      status: "failed",
+      rowIndexFrom: 10,
+      rowIndexTo: 20,
+      cityCode: "01101",
+      productId: "1001",
+      includeProductJson: true,
+    });
+
+    const call = mockState.calls.find((x) => x.sql.includes("count(*) over() as total_count"));
+    expect(call).toBeTruthy();
+    expect(call?.sql).toContain("status = $");
+    expect(call?.sql).toContain("row_index >= $");
+    expect(call?.sql).toContain("row_index <= $");
+    expect(call?.sql).toContain("city_code = $");
+    expect(call?.sql).toContain("product_id = $");
+    expect(call?.sql).toContain("offset $");
+    expect(result.total).toBe(1);
+    expect(result.items).toEqual([
+      expect.objectContaining({
+        id: "00000000-0000-0000-0000-000000000020",
+        rowIndex: 12,
+        cityCode: "01101",
+        productId: "1001",
+        status: "failed",
+        attemptCount: 2,
+        currentStep: "vectorize",
+        error: "bad row",
+        errorCode: "invalid_json",
+      }),
+    ]);
+  });
+
+  it("applies row and exact-match filters when claiming pending items", async () => {
+    await claimPendingItemsV2({
+      jobId: "00000000-0000-0000-0000-000000000000",
+      limit: 10,
+      filters: {
+        rowIndexFrom: 10,
+        rowIndexTo: 20,
+        cityCode: "01101",
+        productId: "1001",
+      },
+    });
+
+    const selectCall = mockState.calls.find((x) => {
+      return (
+        x.sql.includes("from public.product_import_items_v2") &&
+        x.sql.includes("row_index >= $") &&
+        x.sql.includes("row_index <= $") &&
+        x.sql.includes("city_code = $") &&
+        x.sql.includes("product_id = $")
+      );
+    });
+    expect(selectCall).toBeTruthy();
+  });
+
   it("queries queue stats using filtered counts and next_retry_at", async () => {
     await getQueueStatsV2("00000000-0000-0000-0000-000000000000");
     const call = mockState.calls.find((x) =>
@@ -191,6 +279,29 @@ describe("product-json-import-v2", () => {
     expect(call?.sql).toContain("pending_delayed_count");
     expect(call?.sql).toContain("min(next_retry_at)");
     expect(call?.sql).toContain("filter");
+  });
+
+  it("queries scoped queue stats with run filters", async () => {
+    const summary = await getScopedImportSummaryV2({
+      jobId: "00000000-0000-0000-0000-000000000000",
+      filters: {
+        rowIndexFrom: 10,
+        rowIndexTo: 20,
+        cityCode: "01101",
+        productId: "1001",
+      },
+    });
+
+    const call = mockState.calls.find(
+      (x) =>
+        x.sql.includes("from public.product_import_items_v2") &&
+        x.sql.includes("row_index >= $") &&
+        x.sql.includes("row_index <= $") &&
+        x.sql.includes("city_code = $") &&
+        x.sql.includes("product_id = $")
+    );
+    expect(call).toBeTruthy();
+    expect(summary.totalCount).toBeGreaterThanOrEqual(0);
   });
 
   it("requeues stale processing items back to pending", async () => {

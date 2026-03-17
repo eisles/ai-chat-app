@@ -91,6 +91,16 @@ type JobResponse = {
     skippedCount: number;
     nextRetryAt: string | null;
   };
+  targetSummary?: {
+    totalCount: number;
+    pendingReadyCount: number;
+    pendingDelayedCount: number;
+    processingCount: number;
+    successCount: number;
+    failedCount: number;
+    skippedCount: number;
+    nextRetryAt: string | null;
+  };
   tailStats?: {
     pendingCount: number;
     processingCount: number;
@@ -119,16 +129,25 @@ type JobActionResponse = {
   error?: string;
 };
 
+type JobItemRow = {
+  id: string;
+  rowIndex: number;
+  cityCode: string | null;
+  productId: string | null;
+  status: "pending" | "processing" | "success" | "failed" | "skipped";
+  attemptCount: number;
+  currentStep: string | null;
+  updatedAt: string;
+  error: string | null;
+  errorCode: string | null;
+  nextRetryAt: string | null;
+  productJsonPreview: string | null;
+};
+
 type JobItemsResponse = {
   ok: boolean;
-  items?: Array<{
-    rowIndex: number;
-    cityCode: string | null;
-    productId: string | null;
-    status: string;
-    error: string | null;
-    productJsonPreview: string | null;
-  }>;
+  items?: JobItemRow[];
+  total?: number;
   error?: string;
 };
 
@@ -141,6 +160,7 @@ type RunResponse = {
   http429Count?: number;
   effectiveVectorizeConcurrency?: number;
   timeBudgetMs?: number;
+  targetQueueStats?: JobResponse["queueStats"];
   itemReports?: Array<{
     itemId: string;
     rowIndex: number;
@@ -196,6 +216,7 @@ type AppendItemsResponse = {
 const UPLOAD_MAX_ROWS = 200;
 const UPLOAD_MAX_BYTES = 1_000_000;
 const UPLOAD_STATE_KEY = "product-json-import-v2-upload";
+const JOB_ITEMS_PAGE_SIZE = 50;
 const MAX_TAIL_RUN_REQUESTS = 20;
 const MAX_VECTORIZE_CONCURRENCY = 8;
 const VECTORIZE_CONCURRENCY_RECOVERY_RUNS = 3;
@@ -219,18 +240,19 @@ type UploadResumeState = {
   uploadedItems: number;
 };
 
+type ImportItemStatusFilter = "all" | "pending" | "processing" | "success" | "failed" | "skipped";
+
+type JobItemsFilterValues = {
+  status: ImportItemStatusFilter;
+  rowFrom: string;
+  rowTo: string;
+  cityCode: string;
+  productId: string;
+  includeJson: boolean;
+};
+
 function normalizeHeader(header: string) {
   return header.trim().toLowerCase().replace(/^\ufeff/, "");
-}
-
-function getColumn(record: CsvRow, keys: string[]) {
-  for (const key of keys) {
-    const value = record[key];
-    if (value !== undefined && value !== "") {
-      return value;
-    }
-  }
-  return "";
 }
 
 const CITY_CODE_HEADERS = ["city_code", "city_cd", "citycode", "市区町村コード"];
@@ -314,17 +336,28 @@ export default function ProductJsonImportV2Page() {
   const [failedItems, setFailedItems] = useState<FailedItem[]>([]);
   const [processingItems, setProcessingItems] = useState<ProcessingItem[]>([]);
   const [queueStats, setQueueStats] = useState<JobResponse["queueStats"] | null>(null);
+  const [targetSummary, setTargetSummary] = useState<JobResponse["targetSummary"] | null>(
+    null
+  );
   const [tailStats, setTailStats] = useState<JobResponse["tailStats"] | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [startDialogOpen, setStartDialogOpen] = useState(false);
+  const [runFilterRowFrom, setRunFilterRowFrom] = useState("");
+  const [runFilterRowTo, setRunFilterRowTo] = useState("");
+  const [runFilterCityCode, setRunFilterCityCode] = useState("");
+  const [runFilterProductId, setRunFilterProductId] = useState("");
   const [addDialog, setAddDialog] = useState<{
     open: boolean;
     job: Job | null;
     followup: FollowupConfig | null;
   }>({ open: false, job: null, followup: null });
   const [deleteDialog, setDeleteDialog] = useState<{
+    open: boolean;
+    job: Job | null;
+  }>({ open: false, job: null });
+  const [itemsDialog, setItemsDialog] = useState<{
     open: boolean;
     job: Job | null;
   }>({ open: false, job: null });
@@ -351,18 +384,18 @@ export default function ProductJsonImportV2Page() {
   const [jobFollowups, setJobFollowups] = useState<Record<string, FollowupConfig>>(
     {}
   );
-  const [jobPreviews, setJobPreviews] = useState<
-    Record<string, JobItemsResponse["items"] | null>
-  >({});
-  const [jobPreviewOpen, setJobPreviewOpen] = useState<Record<string, boolean>>(
-    {}
-  );
-  const [jobPreviewLoading, setJobPreviewLoading] = useState<
-    Record<string, boolean>
-  >({});
-  const [jobPreviewError, setJobPreviewError] = useState<
-    Record<string, string | null>
-  >({});
+  const [itemsFilterStatus, setItemsFilterStatus] =
+    useState<ImportItemStatusFilter>("all");
+  const [itemsFilterRowFrom, setItemsFilterRowFrom] = useState("");
+  const [itemsFilterRowTo, setItemsFilterRowTo] = useState("");
+  const [itemsFilterCityCode, setItemsFilterCityCode] = useState("");
+  const [itemsFilterProductId, setItemsFilterProductId] = useState("");
+  const [itemsFilterIncludeJson, setItemsFilterIncludeJson] = useState(false);
+  const [itemsOffset, setItemsOffset] = useState(0);
+  const [itemsRows, setItemsRows] = useState<JobItemRow[]>([]);
+  const [itemsTotal, setItemsTotal] = useState(0);
+  const [itemsLoading, setItemsLoading] = useState(false);
+  const [itemsError, setItemsError] = useState<string | null>(null);
   const [jobDeleteDownstream, setJobDeleteDownstream] = useState<
     Record<string, boolean>
   >({});
@@ -373,6 +406,19 @@ export default function ProductJsonImportV2Page() {
   const [tailRunResults, setTailRunResults] = useState<
     Record<string, TailRunSummary | null>
   >({});
+
+  const hasRunFilters =
+    runFilterRowFrom.trim().length > 0 ||
+    runFilterRowTo.trim().length > 0 ||
+    runFilterCityCode.trim().length > 0 ||
+    runFilterProductId.trim().length > 0;
+
+  const appendCurrentRunFilters = (params: URLSearchParams) => {
+    if (runFilterRowFrom.trim()) params.set("rowIndexFrom", runFilterRowFrom.trim());
+    if (runFilterRowTo.trim()) params.set("rowIndexTo", runFilterRowTo.trim());
+    if (runFilterCityCode.trim()) params.set("cityCode", runFilterCityCode.trim());
+    if (runFilterProductId.trim()) params.set("productId", runFilterProductId.trim());
+  };
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -466,7 +512,9 @@ export default function ProductJsonImportV2Page() {
   };
 
   async function fetchStatus(jobId: string) {
-    const res = await fetch(`/api/product-json-import-v2?jobId=${jobId}`, {
+    const params = new URLSearchParams({ jobId });
+    appendCurrentRunFilters(params);
+    const res = await fetch(`/api/product-json-import-v2?${params.toString()}`, {
       cache: "no-store",
     });
     const data = await readJsonResponse<JobResponse>(res);
@@ -494,6 +542,7 @@ export default function ProductJsonImportV2Page() {
     setFailedItems(data.failedItems ?? []);
     setProcessingItems(data.processingItems ?? []);
     setQueueStats(queue);
+    setTargetSummary(data.targetSummary ?? null);
     setTailStats(tail);
     return { ...data, job: nextJob };
   }
@@ -545,42 +594,119 @@ export default function ProductJsonImportV2Page() {
       }
       return next;
     });
-    setJobPreviewOpen((prev) => {
-      const next = { ...prev };
-      for (const jobItem of nextJobs) {
-        if (next[jobItem.id] === undefined) {
-          next[jobItem.id] = false;
-        }
-      }
-      return next;
-    });
     return nextJobs;
   }
 
-  async function fetchJobItemsPreview(jobId: string) {
-    setJobPreviewLoading((prev) => ({ ...prev, [jobId]: true }));
-    setJobPreviewError((prev) => ({ ...prev, [jobId]: null }));
+  async function fetchJobItems(
+    jobId: string,
+    offset = itemsOffset,
+    overrides?: Partial<JobItemsFilterValues>
+  ) {
+    const filters: JobItemsFilterValues = {
+      status: overrides?.status ?? itemsFilterStatus,
+      rowFrom: overrides?.rowFrom ?? itemsFilterRowFrom,
+      rowTo: overrides?.rowTo ?? itemsFilterRowTo,
+      cityCode: overrides?.cityCode ?? itemsFilterCityCode,
+      productId: overrides?.productId ?? itemsFilterProductId,
+      includeJson: overrides?.includeJson ?? itemsFilterIncludeJson,
+    };
+    const params = new URLSearchParams();
+    params.set("limit", String(JOB_ITEMS_PAGE_SIZE));
+    params.set("offset", String(offset));
+    if (filters.status !== "all") params.set("status", filters.status);
+    if (filters.rowFrom) params.set("rowIndexFrom", filters.rowFrom);
+    if (filters.rowTo) params.set("rowIndexTo", filters.rowTo);
+    if (filters.cityCode.trim()) params.set("cityCode", filters.cityCode.trim());
+    if (filters.productId.trim()) params.set("productId", filters.productId.trim());
+    if (filters.includeJson) params.set("includeProductJson", "true");
+
+    setItemsLoading(true);
+    setItemsError(null);
     try {
       const res = await fetch(
-        `/api/product-json-import-v2/jobs/${jobId}/items?limit=10`,
+        `/api/product-json-import-v2/jobs/${jobId}/items?${params.toString()}`,
         { cache: "no-store" }
       );
       const data = await readJsonResponse<JobItemsResponse>(res);
       if (!data.ok) {
-        throw new Error(data.error ?? "プレビュー取得に失敗しました");
+        throw new Error(data.error ?? "item 一覧の取得に失敗しました");
       }
-      setJobPreviews((prev) => ({ ...prev, [jobId]: data.items ?? [] }));
-    } catch (previewError) {
+      setItemsRows(data.items ?? []);
+      setItemsTotal(data.total ?? 0);
+      setItemsOffset(offset);
+    } catch (itemsFetchError) {
       const message =
-        previewError instanceof Error ? previewError.message : "プレビュー取得に失敗しました";
-      setJobPreviewError((prev) => ({ ...prev, [jobId]: message }));
+        itemsFetchError instanceof Error
+          ? itemsFetchError.message
+          : "item 一覧の取得に失敗しました";
+      setItemsError(message);
     } finally {
-      setJobPreviewLoading((prev) => ({ ...prev, [jobId]: false }));
+      setItemsLoading(false);
     }
   }
 
-  async function runBatch() {
+  function applyItemsStatusFilter(nextStatus: ImportItemStatusFilter) {
+    setItemsFilterStatus(nextStatus);
+    if (!itemsDialog.job) return;
+    void fetchJobItems(itemsDialog.job.id, 0, { status: nextStatus });
+  }
+
+  async function openItemsDialog(targetJob: Job) {
+    setItemsDialog({ open: true, job: targetJob });
+    await fetchJobItems(targetJob.id, 0);
+  }
+
+  async function openItemsDialogWithCurrentTarget(targetJob: Job) {
+    setItemsFilterStatus("all");
+    setItemsFilterRowFrom(runFilterRowFrom);
+    setItemsFilterRowTo(runFilterRowTo);
+    setItemsFilterCityCode(runFilterCityCode);
+    setItemsFilterProductId(runFilterProductId);
+    setItemsOffset(0);
+    setItemsDialog({ open: true, job: targetJob });
+
+    const params = new URLSearchParams();
+    params.set("limit", String(JOB_ITEMS_PAGE_SIZE));
+    params.set("offset", "0");
+    appendCurrentRunFilters(params);
+
+    setItemsLoading(true);
+    setItemsError(null);
+    try {
+      const res = await fetch(
+        `/api/product-json-import-v2/jobs/${targetJob.id}/items?${params.toString()}`,
+        { cache: "no-store" }
+      );
+      const data = await readJsonResponse<JobItemsResponse>(res);
+      if (!data.ok) {
+        throw new Error(data.error ?? "item 一覧の取得に失敗しました");
+      }
+      setItemsRows(data.items ?? []);
+      setItemsTotal(data.total ?? 0);
+      setItemsOffset(0);
+    } catch (itemsFetchError) {
+      const message =
+        itemsFetchError instanceof Error
+          ? itemsFetchError.message
+          : "item 一覧の取得に失敗しました";
+      setItemsError(message);
+    } finally {
+      setItemsLoading(false);
+    }
+  }
+
+  async function runBatch(): Promise<RunResponse | null> {
     if (!job) return null;
+    const parsedRowFrom = runFilterRowFrom ? Number.parseInt(runFilterRowFrom, 10) : NaN;
+    const parsedRowTo = runFilterRowTo ? Number.parseInt(runFilterRowTo, 10) : NaN;
+    const rowIndexFrom = Number.isFinite(parsedRowFrom) ? parsedRowFrom : null;
+    const rowIndexToRaw = Number.isFinite(parsedRowTo) ? parsedRowTo : null;
+    const rowIndexTo =
+      rowIndexFrom !== null &&
+      rowIndexToRaw !== null &&
+      rowIndexToRaw < rowIndexFrom
+        ? rowIndexFrom
+        : rowIndexToRaw;
     const res = await fetch("/api/product-json-import-v2/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -597,6 +723,12 @@ export default function ProductJsonImportV2Page() {
         vectorizeStartIntervalMs: Math.max(0, parseInt(vectorizeStartIntervalMs, 10) || 0),
         maxVectorizeHeadImages: parseInt(maxVectorizeHeadImages, 10) || 9,
         autoAdjustVectorizeConcurrency,
+        filters: {
+          rowIndexFrom,
+          rowIndexTo,
+          cityCode: runFilterCityCode.trim() || null,
+          productId: runFilterProductId.trim() || null,
+        },
       }),
     });
     const data = await readJsonResponse<RunResponse>(res);
@@ -612,9 +744,8 @@ export default function ProductJsonImportV2Page() {
     }
     if (data.job) {
       setJob(data.job);
-      return data.job;
     }
-    return null;
+    return data;
   }
 
   useEffect(() => {
@@ -654,18 +785,21 @@ export default function ProductJsonImportV2Page() {
 
       isTicking.current = true;
       try {
-        const latestJob = await runBatch();
+        const latestRun = await runBatch();
         const status = await fetchStatus(job.id);
         setConsecutiveRunErrors(0);
+        const scopedQueueStats = hasRunFilters
+          ? (latestRun?.targetQueueStats ?? status.queueStats)
+          : status.queueStats;
         const queueExhausted =
-          (status.queueStats?.pendingReadyCount ?? 0) === 0 &&
-          (status.queueStats?.pendingDelayedCount ?? 0) === 0 &&
-          (status.queueStats?.processingCount ?? 0) === 0;
-        if (latestJob?.status === "completed" || queueExhausted) {
+          (scopedQueueStats?.pendingReadyCount ?? 0) === 0 &&
+          (scopedQueueStats?.pendingDelayedCount ?? 0) === 0 &&
+          (scopedQueueStats?.processingCount ?? 0) === 0;
+        if (latestRun?.job?.status === "completed" || queueExhausted) {
           setIsRunning(false);
           return;
         }
-        timer = setTimeout(tick, calcDelayMs(status.queueStats));
+        timer = setTimeout(tick, calcDelayMs(scopedQueueStats));
       } catch (runError) {
         const message =
           runError instanceof Error ? runError.message : "処理に失敗しました";
@@ -693,6 +827,7 @@ export default function ProductJsonImportV2Page() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 自動実行ループの再作成を最小限に抑える
   }, [job, isRunning, limit, timeBudgetMs]);
 
   useEffect(() => {
@@ -712,10 +847,14 @@ export default function ProductJsonImportV2Page() {
       }
     }
   }, [
+    job,
     job?.id,
     job?.doTextEmbedding,
     job?.doImageCaptions,
     job?.doImageVectors,
+    limit,
+    textConcurrency,
+    timeBudgetMs,
   ]);
 
   async function handleUpload(event: React.SyntheticEvent, mode: "new" | "resume") {
@@ -1237,6 +1376,83 @@ export default function ProductJsonImportV2Page() {
     if (Number.isNaN(date.getTime())) return "-";
     return date.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
   };
+  const runFilterSummary = (() => {
+    const parts: string[] = [];
+    if (runFilterRowFrom.trim() || runFilterRowTo.trim()) {
+      parts.push(`row_index=${runFilterRowFrom.trim() || "1"}..${runFilterRowTo.trim() || "end"}`);
+    }
+    if (runFilterCityCode.trim()) parts.push(`city_code=${runFilterCityCode.trim()}`);
+    if (runFilterProductId.trim()) parts.push(`product_id=${runFilterProductId.trim()}`);
+    return parts.length > 0 ? parts.join(" / ") : "全件";
+  })();
+  const targetCompletedCount = targetSummary
+    ? Math.max(
+        0,
+        targetSummary.totalCount -
+          targetSummary.pendingReadyCount -
+          targetSummary.pendingDelayedCount -
+          targetSummary.processingCount
+      )
+    : 0;
+  const targetProgressPercent =
+    targetSummary && targetSummary.totalCount > 0
+      ? Math.min(100, Math.round((targetCompletedCount / targetSummary.totalCount) * 100))
+      : 0;
+  const targetStateLabel = (() => {
+    if (!hasRunFilters || !targetSummary) return "未指定";
+    if (
+      targetSummary.pendingReadyCount === 0 &&
+      targetSummary.pendingDelayedCount === 0 &&
+      targetSummary.processingCount === 0
+    ) {
+      return "完了";
+    }
+    if (targetSummary.pendingReadyCount === 0 && targetSummary.pendingDelayedCount > 0) {
+      return "retry待ち";
+    }
+    if (targetSummary.processingCount > 0 || targetSummary.pendingReadyCount > 0) {
+      return "処理中";
+    }
+    return "未開始";
+  })();
+  const targetStatusMessage = (() => {
+    if (!hasRunFilters || !targetSummary) return null;
+    const targetDone =
+      targetSummary.pendingReadyCount === 0 &&
+      targetSummary.pendingDelayedCount === 0 &&
+      targetSummary.processingCount === 0;
+    if (targetDone) {
+      const jobHasRemaining =
+        (queueStats?.pendingReadyCount ?? 0) > 0 ||
+        (queueStats?.pendingDelayedCount ?? 0) > 0 ||
+        (queueStats?.processingCount ?? 0) > 0;
+      if (jobHasRemaining) {
+        return "今回対象は完了しました。job全体には未処理が残っています。";
+      }
+      return "今回対象は完了しました。";
+    }
+    if (targetSummary.pendingReadyCount === 0 && targetSummary.pendingDelayedCount > 0) {
+      return `今回対象は retry 待ちです。次回: ${formatJst(targetSummary.nextRetryAt)}`;
+    }
+    if (targetSummary.processingCount > 0 || targetSummary.pendingReadyCount > 0) {
+      return "今回対象を処理中です。";
+    }
+    return null;
+  })();
+  const targetStateClassName = (() => {
+    switch (targetStateLabel) {
+      case "完了":
+        return "border-emerald-300/60 bg-emerald-50 text-emerald-900";
+      case "retry待ち":
+        return "border-amber-300/60 bg-amber-50 text-amber-900";
+      case "処理中":
+        return "border-sky-300/60 bg-sky-50 text-sky-900";
+      default:
+        return "border-muted bg-background text-muted-foreground";
+    }
+  })();
+  const itemsDialogRangeStart = itemsTotal === 0 ? 0 : itemsOffset + 1;
+  const itemsDialogRangeEnd = itemsOffset + itemsRows.length;
   const formatElapsed = (start: string | null, end: string | null) => {
     if (!start) return "-";
     const startDate = new Date(start);
@@ -1759,6 +1975,59 @@ export default function ProductJsonImportV2Page() {
             )}
           </div>
 
+          {hasRunFilters && targetSummary && (
+            <div className="mt-4 rounded-md border border-primary/30 bg-primary/5 px-3 py-3 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="font-medium text-foreground">今回対象</div>
+                <div
+                  className={cn(
+                    "rounded-full border px-2 py-0.5 text-xs font-medium",
+                    targetStateClassName
+                  )}
+                >
+                  {targetStateLabel}
+                </div>
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                条件: {runFilterSummary}
+              </div>
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="font-medium text-foreground">
+                    進捗: {targetCompletedCount} / {targetSummary.totalCount} 完了
+                  </div>
+                  <div className="mt-1 h-2 w-56 overflow-hidden rounded-full bg-primary/15">
+                    <div
+                      className="h-full rounded-full bg-primary transition-[width]"
+                      style={{ width: `${targetProgressPercent}%` }}
+                    />
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    void openItemsDialogWithCurrentTarget(job);
+                  }}
+                >
+                  今回対象 {targetSummary.totalCount} 件を見る
+                </Button>
+              </div>
+              <div className="mt-2 text-xs text-muted-foreground">
+                pending_ready={targetSummary.pendingReadyCount}
+                {" / "}pending_delayed={targetSummary.pendingDelayedCount}
+                {" / "}processing={targetSummary.processingCount}
+                {" / "}success={targetSummary.successCount}
+                {" / "}failed={targetSummary.failedCount}
+                {" / "}skipped={targetSummary.skippedCount}
+              </div>
+              {targetStatusMessage && (
+                <div className="mt-2 text-xs text-foreground/80">{targetStatusMessage}</div>
+              )}
+            </div>
+          )}
+
           {queueStats && queueStats.pendingReadyCount === 0 && queueStats.pendingDelayedCount > 0 && (
             <div className="mt-3 rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
               pending が next_retry_at により待機中です。次回: {formatJst(queueStats.nextRetryAt)}
@@ -1814,6 +2083,15 @@ export default function ProductJsonImportV2Page() {
             </Button>
             <Button
               type="button"
+              variant="secondary"
+              onClick={() => {
+                void openItemsDialog(job);
+              }}
+            >
+              登録済み item 一覧
+            </Button>
+            <Button
+              type="button"
               variant={currentTailButtonVariant}
               className={
                 currentTailButtonVariant === "default"
@@ -1844,7 +2122,7 @@ export default function ProductJsonImportV2Page() {
               onClick={async () => {
                 const next = await runBatch();
                 await fetchStatus(job.id);
-                if (next?.status === "completed") setIsRunning(false);
+                if (next?.job?.status === "completed") setIsRunning(false);
               }}
               disabled={job.status === "completed"}
             >
@@ -1868,6 +2146,66 @@ export default function ProductJsonImportV2Page() {
                 <div>limit: {limit}</div>
                 <div>timeBudgetMs: {timeBudgetMs}</div>
                 <div>maxVectorizeHeadImages: {maxVectorizeHeadImages}</div>
+                <div>今回対象: {runFilterSummary}</div>
+              </div>
+              <div className="space-y-3 rounded-md border bg-muted/20 p-3 text-sm">
+                <div className="font-medium text-foreground">今回の対象範囲</div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs text-muted-foreground">
+                    空なら全件です。cityCode と productId は完全一致です。
+                  </div>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      setRunFilterRowFrom("");
+                      setRunFilterRowTo("");
+                      setRunFilterCityCode("");
+                      setRunFilterProductId("");
+                    }}
+                  >
+                    対象範囲をクリアして全件
+                  </Button>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="space-y-1">
+                    <span className="text-xs text-muted-foreground">rowIndexFrom</span>
+                    <input
+                      type="number"
+                      min="1"
+                      value={runFilterRowFrom}
+                      onChange={(event) => setRunFilterRowFrom(event.target.value)}
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-xs text-muted-foreground">rowIndexTo</span>
+                    <input
+                      type="number"
+                      min="1"
+                      value={runFilterRowTo}
+                      onChange={(event) => setRunFilterRowTo(event.target.value)}
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-xs text-muted-foreground">cityCode</span>
+                    <input
+                      value={runFilterCityCode}
+                      onChange={(event) => setRunFilterCityCode(event.target.value)}
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-xs text-muted-foreground">productId</span>
+                    <input
+                      value={runFilterProductId}
+                      onChange={(event) => setRunFilterProductId(event.target.value)}
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    />
+                  </label>
+                </div>
               </div>
               <DialogFooter>
                 <Button
@@ -1893,6 +2231,7 @@ export default function ProductJsonImportV2Page() {
             <div>処理開始: 自動でrunを繰り返します（進捗が止まるまで継続）。</div>
             <div>停止: 自動実行を止めます（処理中の行は次回再開時に続行）。</div>
             <div>最新化: ステータス表示だけを更新します。</div>
+            <div>今回対象: {runFilterSummary}</div>
             <div>残り画像ベクトルを全部処理: tail backlog が空になるか、進捗が止まるまで自動で繰り返します。</div>
             <div>1回実行: runを1回だけ実行します。</div>
           </div>
@@ -2360,10 +2699,6 @@ export default function ProductJsonImportV2Page() {
               const isDeleting = deletingJobs[jobItem.id] ?? false;
               const isAdding = addingJobs[jobItem.id] ?? false;
               const isRunningTail = runningTailJobs[jobItem.id] ?? false;
-              const isPreviewOpen = jobPreviewOpen[jobItem.id] ?? false;
-              const previewItems = jobPreviews[jobItem.id];
-              const previewError = jobPreviewError[jobItem.id];
-              const previewLoading = jobPreviewLoading[jobItem.id] ?? false;
               const tailRunResult = tailRunResults[jobItem.id];
               const isSelectedJob = job?.id === jobItem.id;
               const selectedTailPending = isSelectedJob
@@ -2502,15 +2837,11 @@ export default function ProductJsonImportV2Page() {
                     <Button
                       type="button"
                       variant="secondary"
-                      onClick={async () => {
-                        const nextOpen = !isPreviewOpen;
-                        setJobPreviewOpen((prev) => ({ ...prev, [jobItem.id]: nextOpen }));
-                        if (nextOpen && !previewItems && !previewLoading) {
-                          await fetchJobItemsPreview(jobItem.id);
-                        }
+                      onClick={() => {
+                        void openItemsDialog(jobItem);
                       }}
                     >
-                      {isPreviewOpen ? "プレビューを閉じる" : "プレビューを表示"}
+                      登録済み item 一覧
                     </Button>
                   </div>
                   <div className="mt-2 text-xs text-muted-foreground">
@@ -2530,32 +2861,6 @@ export default function ProductJsonImportV2Page() {
                           ? ` / ${tailRunResult.stoppedReason}`
                           : ""}
                       </div>
-                    </div>
-                  )}
-                  {isPreviewOpen && (
-                    <div className="mt-3 rounded-md border bg-background px-3 py-2 text-xs text-muted-foreground">
-                      <div className="font-medium text-foreground">登録データのプレビュー</div>
-                      {previewLoading && <div className="mt-2">読み込み中...</div>}
-                      {previewError && (
-                        <div className="mt-2 text-destructive">{previewError}</div>
-                      )}
-                      {!previewLoading && !previewError && (
-                        <div className="mt-2 space-y-1">
-                          {(previewItems ?? []).length === 0 && (
-                            <div>データがありません。</div>
-                          )}
-                          {(previewItems ?? []).map((item) => (
-                            <div key={`${jobItem.id}-${item.rowIndex}`}>
-                              row {item.rowIndex} / product_id {item.productId ?? "-"} / city_code{" "}
-                              {item.cityCode ?? "-"} / status {item.status}{" "}
-                              {item.error ? `/ error ${item.error}` : ""}
-                              {item.productJsonPreview
-                                ? ` / json: ${item.productJsonPreview}`
-                                : ""}
-                            </div>
-                          ))}
-                        </div>
-                      )}
                     </div>
                   )}
                   <div className="mt-3 flex flex-wrap items-center gap-3">
@@ -2766,6 +3071,239 @@ export default function ProductJsonImportV2Page() {
           {error}
         </Card>
       )}
+      <Dialog
+        open={itemsDialog.open}
+        onOpenChange={(open) => {
+          setItemsDialog((prev) => ({ ...prev, open }));
+          if (!open) {
+            setItemsError(null);
+          }
+        }}
+      >
+        <DialogContent className="flex max-h-[calc(100vh-2rem)] max-w-6xl flex-col gap-0 overflow-hidden p-0">
+          <DialogHeader className="shrink-0 border-b px-6 py-4">
+            <DialogTitle>登録済み item 一覧</DialogTitle>
+            <DialogDescription>
+              jobId: {itemsDialog.job?.id ?? "-"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 space-y-4 overflow-y-auto px-6 py-4 text-sm">
+            <div className="grid gap-3 rounded-md border bg-muted/20 p-3 sm:grid-cols-2 lg:grid-cols-5">
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">ステータス</label>
+                <Select
+                  value={itemsFilterStatus}
+                  onValueChange={(value) =>
+                    applyItemsStatusFilter(value as ImportItemStatusFilter)
+                  }
+                >
+                  <SelectTrigger className="h-9">
+                    <SelectValue placeholder="ステータス" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">すべて</SelectItem>
+                    <SelectItem value="pending">pending</SelectItem>
+                    <SelectItem value="processing">processing</SelectItem>
+                    <SelectItem value="success">success</SelectItem>
+                    <SelectItem value="failed">failed</SelectItem>
+                    <SelectItem value="skipped">skipped</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <label className="space-y-1">
+                <span className="text-xs text-muted-foreground">rowIndexFrom</span>
+                <input
+                  type="number"
+                  min="1"
+                  value={itemsFilterRowFrom}
+                  onChange={(event) => setItemsFilterRowFrom(event.target.value)}
+                  className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs text-muted-foreground">rowIndexTo</span>
+                <input
+                  type="number"
+                  min="1"
+                  value={itemsFilterRowTo}
+                  onChange={(event) => setItemsFilterRowTo(event.target.value)}
+                  className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs text-muted-foreground">cityCode</span>
+                <input
+                  value={itemsFilterCityCode}
+                  onChange={(event) => setItemsFilterCityCode(event.target.value)}
+                  className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs text-muted-foreground">productId</span>
+                <input
+                  value={itemsFilterProductId}
+                  onChange={(event) => setItemsFilterProductId(event.target.value)}
+                  className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                />
+              </label>
+              <label className="flex items-center gap-2 text-xs text-muted-foreground lg:col-span-5">
+                <input
+                  type="checkbox"
+                  checked={itemsFilterIncludeJson}
+                  onChange={(event) => setItemsFilterIncludeJson(event.target.checked)}
+                />
+                <span>product_json preview を表示</span>
+              </label>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground lg:col-span-5">
+                <span>ステータスで絞り込み:</span>
+                {(
+                  [
+                    "all",
+                    "pending",
+                    "processing",
+                    "success",
+                    "failed",
+                    "skipped",
+                  ] as ImportItemStatusFilter[]
+                ).map((status) => {
+                  const active = itemsFilterStatus === status;
+                  return (
+                    <Button
+                      key={status}
+                      type="button"
+                      variant={active ? "default" : "secondary"}
+                      size="sm"
+                      onClick={() => applyItemsStatusFilter(status)}
+                    >
+                      {status === "all" ? "すべて" : status}
+                    </Button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-xs text-muted-foreground">
+                total: {itemsTotal} 件 / 表示: {itemsDialogRangeStart}-{itemsDialogRangeEnd}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={!itemsDialog.job || itemsLoading || itemsOffset === 0}
+                  onClick={() => {
+                    if (!itemsDialog.job) return;
+                    void fetchJobItems(
+                      itemsDialog.job.id,
+                      Math.max(0, itemsOffset - JOB_ITEMS_PAGE_SIZE)
+                    );
+                  }}
+                >
+                  前へ
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={
+                    !itemsDialog.job ||
+                    itemsLoading ||
+                    itemsOffset + JOB_ITEMS_PAGE_SIZE >= itemsTotal
+                  }
+                  onClick={() => {
+                    if (!itemsDialog.job) return;
+                    void fetchJobItems(itemsDialog.job.id, itemsOffset + JOB_ITEMS_PAGE_SIZE);
+                  }}
+                >
+                  次へ
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={!itemsDialog.job || itemsLoading}
+                  onClick={() => {
+                    if (!itemsDialog.job) return;
+                    void fetchJobItems(itemsDialog.job.id, 0);
+                  }}
+                >
+                  再検索
+                </Button>
+              </div>
+            </div>
+            {itemsError && <div className="text-sm text-destructive">{itemsError}</div>}
+            <div className="overflow-auto rounded-md border">
+              <table className="min-w-full border-collapse text-xs">
+                <thead className="bg-muted/40 text-left text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2">row_index</th>
+                    <th className="px-3 py-2">city_code</th>
+                    <th className="px-3 py-2">product_id</th>
+                    <th className="px-3 py-2">status</th>
+                    <th className="px-3 py-2">attempt_count</th>
+                    <th className="px-3 py-2">current_step</th>
+                    <th className="px-3 py-2">updated_at</th>
+                    <th className="px-3 py-2">error</th>
+                    {itemsFilterIncludeJson && (
+                      <th className="px-3 py-2">product_json_preview</th>
+                    )}
+                  </tr>
+                </thead>
+                <tbody>
+                  {itemsLoading && (
+                    <tr>
+                      <td
+                        colSpan={itemsFilterIncludeJson ? 9 : 8}
+                        className="px-3 py-6 text-center text-muted-foreground"
+                      >
+                        読み込み中...
+                      </td>
+                    </tr>
+                  )}
+                  {!itemsLoading && itemsRows.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={itemsFilterIncludeJson ? 9 : 8}
+                        className="px-3 py-6 text-center text-muted-foreground"
+                      >
+                        条件に一致する item はありません。
+                      </td>
+                    </tr>
+                  )}
+                  {!itemsLoading &&
+                    itemsRows.map((item) => (
+                      <tr key={item.id} className="border-t align-top">
+                        <td className="px-3 py-2">{item.rowIndex}</td>
+                        <td className="px-3 py-2">{item.cityCode ?? "-"}</td>
+                        <td className="px-3 py-2">{item.productId ?? "-"}</td>
+                        <td className="px-3 py-2">{item.status}</td>
+                        <td className="px-3 py-2">{item.attemptCount}</td>
+                        <td className="px-3 py-2">{item.currentStep ?? "-"}</td>
+                        <td className="px-3 py-2">{formatJst(item.updatedAt)}</td>
+                        <td className="max-w-[280px] px-3 py-2 whitespace-pre-wrap break-words">
+                          {item.error ?? "-"}
+                        </td>
+                        {itemsFilterIncludeJson && (
+                          <td className="max-w-[420px] px-3 py-2 whitespace-pre-wrap break-all text-muted-foreground">
+                            {item.productJsonPreview ?? "-"}
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <DialogFooter className="shrink-0 border-t px-6 py-4">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setItemsDialog({ open: false, job: null })}
+            >
+              閉じる
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={addDialog.open}
         onOpenChange={(open) =>

@@ -42,6 +42,46 @@ export type ImportQueueStatsV2 = {
   nextRetryAt: string | null;
 };
 
+export type ScopedImportSummaryV2 = ImportQueueStatsV2 & {
+  totalCount: number;
+};
+
+export const IMPORT_ITEM_STATUSES = [
+  "pending",
+  "processing",
+  "success",
+  "failed",
+  "skipped",
+] as const;
+
+export type ImportItemStatusV2 = (typeof IMPORT_ITEM_STATUSES)[number];
+
+export type ImportRunFilters = {
+  rowIndexFrom: number | null;
+  rowIndexTo: number | null;
+  cityCode: string | null;
+  productId: string | null;
+};
+
+export type ImportItemsFilterV2 = ImportRunFilters & {
+  status: ImportItemStatusV2 | null;
+};
+
+export type ImportItemListRow = {
+  id: string;
+  rowIndex: number;
+  cityCode: string | null;
+  productId: string | null;
+  status: ImportItemStatusV2;
+  attemptCount: number;
+  error: string | null;
+  errorCode: string | null;
+  currentStep: string | null;
+  nextRetryAt: string | null;
+  updatedAt: string;
+  productJsonPreview: string | null;
+};
+
 export type VectorizeTailItem = {
   id: string;
   jobId: string;
@@ -603,36 +643,100 @@ export async function listImportJobsV2(limit: number) {
   })) satisfies ImportJobSummaryV2[];
 }
 
-export async function getImportItemsPreviewV2(jobId: string, limit: number) {
+export async function listImportItemsV2(options: {
+  jobId: string;
+  limit: number;
+  offset: number;
+  status?: ImportItemStatusV2 | null;
+  rowIndexFrom?: number | null;
+  rowIndexTo?: number | null;
+  cityCode?: string | null;
+  productId?: string | null;
+  includeProductJson?: boolean;
+}): Promise<{ items: ImportItemListRow[]; total: number }> {
   const db = await ensureProductImportTablesV2();
-  const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+  const safeLimit = Math.max(1, Math.min(200, Math.floor(options.limit)));
+  const safeOffset = Math.max(0, Math.floor(options.offset));
+  const status = options.status ?? null;
+  const rowIndexFrom = options.rowIndexFrom ?? null;
+  const rowIndexTo = options.rowIndexTo ?? null;
+  const cityCode = options.cityCode ?? null;
+  const productId = options.productId ?? null;
+  const productJsonPreviewSql =
+    options.includeProductJson === true ? db`left(product_json, 400)` : db`null`;
   const rows = (await db`
     select
+      id,
       row_index,
       city_code,
       product_id,
       status,
+      attempt_count,
       error,
-      substring(product_json, 1, 160) as product_json_preview
+      error_code,
+      current_step,
+      next_retry_at,
+      updated_at,
+      ${productJsonPreviewSql} as product_json_preview,
+      count(*) over() as total_count
     from public.product_import_items_v2
-    where job_id = ${jobId}
+    where job_id = ${options.jobId}
+      and (${status}::text is null or status = ${status})
+      and (${rowIndexFrom}::int is null or row_index >= ${rowIndexFrom})
+      and (${rowIndexTo}::int is null or row_index <= ${rowIndexTo})
+      and (${cityCode}::text is null or city_code = ${cityCode})
+      and (${productId}::text is null or product_id = ${productId})
     order by row_index
     limit ${safeLimit}
+    offset ${safeOffset}
   `) as Array<{
+    id: string;
     row_index: number;
     city_code: string | null;
     product_id: string | null;
-    status: string;
+    status: ImportItemStatusV2;
+    attempt_count: number;
     error: string | null;
+    error_code: string | null;
+    current_step: string | null;
+    next_retry_at: Date | null;
+    updated_at: Date;
     product_json_preview: string | null;
+    total_count: number;
   }>;
-  return rows.map((row) => ({
-    rowIndex: row.row_index,
-    cityCode: row.city_code,
-    productId: row.product_id,
-    status: row.status,
-    error: row.error,
-    productJsonPreview: row.product_json_preview,
+  return {
+    items: rows.map((row) => ({
+      id: row.id,
+      rowIndex: row.row_index,
+      cityCode: row.city_code,
+      productId: row.product_id,
+      status: row.status,
+      attemptCount: Number(row.attempt_count ?? 0),
+      error: row.error,
+      errorCode: row.error_code,
+      currentStep: row.current_step,
+      nextRetryAt: row.next_retry_at ? row.next_retry_at.toISOString() : null,
+      updatedAt: row.updated_at.toISOString(),
+      productJsonPreview: row.product_json_preview,
+    })),
+    total: Number(rows[0]?.total_count ?? 0),
+  };
+}
+
+export async function getImportItemsPreviewV2(jobId: string, limit: number) {
+  const { items } = await listImportItemsV2({
+    jobId,
+    limit,
+    offset: 0,
+    includeProductJson: true,
+  });
+  return items.map((item) => ({
+    rowIndex: item.rowIndex,
+    cityCode: item.cityCode,
+    productId: item.productId,
+    status: item.status,
+    error: item.error,
+    productJsonPreview: item.productJsonPreview?.slice(0, 160) ?? null,
   }));
 }
 
@@ -1154,9 +1258,32 @@ export async function checkExistingVectorizationComplete(options: {
 }
 
 export async function getQueueStatsV2(jobId: string): Promise<ImportQueueStatsV2> {
+  const summary = await getScopedImportSummaryV2({ jobId });
+  return {
+    pendingReadyCount: summary.pendingReadyCount,
+    pendingDelayedCount: summary.pendingDelayedCount,
+    processingCount: summary.processingCount,
+    successCount: summary.successCount,
+    failedCount: summary.failedCount,
+    skippedCount: summary.skippedCount,
+    nextRetryAt: summary.nextRetryAt,
+  };
+}
+
+export async function getScopedImportSummaryV2(options: {
+  jobId: string;
+  filters?: ImportRunFilters;
+}): Promise<ScopedImportSummaryV2> {
   const db = await ensureProductImportTablesV2();
+  const filters = options.filters ?? {
+    rowIndexFrom: null,
+    rowIndexTo: null,
+    cityCode: null,
+    productId: null,
+  };
   const rows = (await db`
     select
+      count(*)::int as total_count,
       count(*) filter (
         where status = 'pending'
           and (next_retry_at is null or next_retry_at <= now())
@@ -1174,8 +1301,13 @@ export async function getQueueStatsV2(jobId: string): Promise<ImportQueueStatsV2
           and next_retry_at > now()
       ) as next_retry_at
     from public.product_import_items_v2
-    where job_id = ${jobId}
+    where job_id = ${options.jobId}
+      and (${filters.rowIndexFrom}::int is null or row_index >= ${filters.rowIndexFrom})
+      and (${filters.rowIndexTo}::int is null or row_index <= ${filters.rowIndexTo})
+      and (${filters.cityCode}::text is null or city_code = ${filters.cityCode})
+      and (${filters.productId}::text is null or product_id = ${filters.productId})
   `) as Array<{
+    total_count: number;
     pending_ready_count: number;
     pending_delayed_count: number;
     processing_count: number;
@@ -1187,6 +1319,7 @@ export async function getQueueStatsV2(jobId: string): Promise<ImportQueueStatsV2
 
   const row = rows[0];
   return {
+    totalCount: Number(row?.total_count ?? 0),
     pendingReadyCount: Number(row?.pending_ready_count ?? 0),
     pendingDelayedCount: Number(row?.pending_delayed_count ?? 0),
     processingCount: Number(row?.processing_count ?? 0),
@@ -1197,17 +1330,47 @@ export async function getQueueStatsV2(jobId: string): Promise<ImportQueueStatsV2
   };
 }
 
-export async function claimPendingItemsV2(jobId: string, limit: number) {
+export async function getScopedQueueStatsV2(options: {
+  jobId: string;
+  filters?: ImportRunFilters;
+}): Promise<ImportQueueStatsV2> {
+  const summary = await getScopedImportSummaryV2(options);
+  return {
+    pendingReadyCount: summary.pendingReadyCount,
+    pendingDelayedCount: summary.pendingDelayedCount,
+    processingCount: summary.processingCount,
+    successCount: summary.successCount,
+    failedCount: summary.failedCount,
+    skippedCount: summary.skippedCount,
+    nextRetryAt: summary.nextRetryAt,
+  };
+}
+
+export async function claimPendingItemsV2(options: {
+  jobId: string;
+  limit: number;
+  filters?: ImportRunFilters;
+}) {
   const db = await ensureProductImportTablesV2();
+  const filters = options.filters ?? {
+    rowIndexFrom: null,
+    rowIndexTo: null,
+    cityCode: null,
+    productId: null,
+  };
   // 2段階でIDを拾ってから更新（特定環境でUPDATE/CTEが0件になる問題の回避）
   const pickedIds = (await db`
     select id
     from public.product_import_items_v2
-    where job_id = ${jobId}
+    where job_id = ${options.jobId}
       and status = 'pending'
       and (next_retry_at is null or next_retry_at <= now())
+      and (${filters.rowIndexFrom}::int is null or row_index >= ${filters.rowIndexFrom})
+      and (${filters.rowIndexTo}::int is null or row_index <= ${filters.rowIndexTo})
+      and (${filters.cityCode}::text is null or city_code = ${filters.cityCode})
+      and (${filters.productId}::text is null or product_id = ${filters.productId})
     order by row_index
-    limit ${limit}
+    limit ${options.limit}
   `) as Array<{ id: string }>;
 
   if (pickedIds.length === 0) return [];
@@ -1219,7 +1382,7 @@ export async function claimPendingItemsV2(jobId: string, limit: number) {
         attempt_count = attempt_count + 1,
         processing_started_at = now(),
         updated_at = now()
-    where job_id = ${jobId}
+    where job_id = ${options.jobId}
       and status = 'pending'
       and id = any(${idList}::uuid[])
     returning id, row_index, city_code, product_id, product_json, attempt_count

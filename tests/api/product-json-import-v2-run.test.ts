@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const claimPendingItemsV2 = vi.fn();
 const getImportJobV2 = vi.fn();
+const getScopedQueueStatsV2 = vi.fn();
 const markJobStartedV2 = vi.fn();
 const markItemsSkippedBulkV2 = vi.fn();
 const markItemFailureV2 = vi.fn();
@@ -29,6 +30,7 @@ const upsertProductImagesVectorize = vi.fn();
 vi.mock("@/lib/product-json-import-v2", () => ({
   claimPendingItemsV2,
   getImportJobV2,
+  getScopedQueueStatsV2,
   markJobStartedV2,
   markItemsSkippedBulkV2,
   markItemFailureV2,
@@ -100,6 +102,15 @@ describe("POST /api/product-json-import-v2/run", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     markJobStartedV2.mockResolvedValue(true);
+    getScopedQueueStatsV2.mockResolvedValue({
+      pendingReadyCount: 0,
+      pendingDelayedCount: 0,
+      processingCount: 0,
+      successCount: 0,
+      failedCount: 0,
+      skippedCount: 0,
+      nextRetryAt: null,
+    });
     requeueStaleProcessingItemsV2.mockResolvedValue(0);
     updateJobStatusV2.mockResolvedValue(undefined);
     markItemSuccessV2.mockResolvedValue(undefined);
@@ -261,7 +272,25 @@ describe("POST /api/product-json-import-v2/run", () => {
 
     expect(res.status).toBe(200);
     expect(json.ok).toBe(true);
-    expect(claimPendingItemsV2).toHaveBeenCalledWith("job-1", 2);
+    expect(json.targetQueueStats).toEqual({
+      pendingReadyCount: 0,
+      pendingDelayedCount: 0,
+      processingCount: 0,
+      successCount: 0,
+      failedCount: 0,
+      skippedCount: 0,
+      nextRetryAt: null,
+    });
+    expect(claimPendingItemsV2).toHaveBeenCalledWith({
+      jobId: "job-1",
+      limit: 2,
+      filters: {
+        rowIndexFrom: null,
+        rowIndexTo: null,
+        cityCode: null,
+        productId: null,
+      },
+    });
   });
 
   it("allows overriding heavy product concurrency from the request payload", async () => {
@@ -286,7 +315,64 @@ describe("POST /api/product-json-import-v2/run", () => {
 
     expect(res.status).toBe(200);
     expect(json.ok).toBe(true);
-    expect(claimPendingItemsV2).toHaveBeenCalledWith("job-1", 3);
+    expect(claimPendingItemsV2).toHaveBeenCalledWith({
+      jobId: "job-1",
+      limit: 3,
+      filters: {
+        rowIndexFrom: null,
+        rowIndexTo: null,
+        cityCode: null,
+        productId: null,
+      },
+    });
+  });
+
+  it("passes normalized run filters to claimPendingItemsV2", async () => {
+    getImportJobV2
+      .mockResolvedValueOnce(createVectorJob())
+      .mockResolvedValueOnce(createVectorJob({ status: "running" }));
+    claimPendingItemsV2.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+
+    const req = new Request("http://localhost/api/product-json-import-v2/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId: "job-1",
+        limit: 5,
+        timeBudgetMs: 25_000,
+        filters: {
+          rowIndexFrom: 20,
+          rowIndexTo: 10,
+          cityCode: "01101",
+          productId: "1001",
+        },
+      }),
+    });
+
+    const res = await POST(req);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(getScopedQueueStatsV2).toHaveBeenCalledWith({
+      jobId: "job-1",
+      filters: {
+        rowIndexFrom: 20,
+        rowIndexTo: 20,
+        cityCode: "01101",
+        productId: "1001",
+      },
+    });
+    expect(claimPendingItemsV2).toHaveBeenCalledWith({
+      jobId: "job-1",
+      limit: 2,
+      filters: {
+        rowIndexFrom: 20,
+        rowIndexTo: 20,
+        cityCode: "01101",
+        productId: "1001",
+      },
+    });
   });
 
   it("caps total vectorize in-flight across two heavy products using the request override", async () => {
@@ -530,7 +616,16 @@ describe("POST /api/product-json-import-v2/run", () => {
 
     expect(res.status).toBe(200);
     expect(json.ok).toBe(true);
-    expect(claimPendingItemsV2).toHaveBeenCalledWith("job-1", 1);
+    expect(claimPendingItemsV2).toHaveBeenCalledWith({
+      jobId: "job-1",
+      limit: 1,
+      filters: {
+        rowIndexFrom: null,
+        rowIndexTo: null,
+        cityCode: null,
+        productId: null,
+      },
+    });
     expect(
       Array.from(
         new Set(embedOrReuseImageEmbedding.mock.calls.map((call) => call[0]))

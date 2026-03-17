@@ -3,6 +3,7 @@ import {
   claimPendingItemsV2,
   enqueueVectorizeTailItems,
   getImportJobV2,
+  getScopedQueueStatsV2,
   markJobStartedV2,
   markItemsSkippedBulkV2,
   markItemFailureV2,
@@ -11,6 +12,7 @@ import {
   markItemSuccessV2,
   requeueStaleProcessingItemsV2,
   releaseClaimedItemsV2,
+  type ImportRunFilters,
   updateJobStatusV2,
 } from "@/lib/product-json-import-v2";
 import {
@@ -115,6 +117,7 @@ type RunPayload = {
   captionConcurrency?: unknown;
   vectorizeConcurrency?: unknown;
   vectorizeStartIntervalMs?: unknown;
+  filters?: unknown;
 };
 
 function lowerConcurrencyOn429(current: number, errorCode: string): number {
@@ -192,6 +195,44 @@ function parseConcurrencyOverride(
     }
   }
   return fallback;
+}
+
+function parseRunFilters(value: unknown): ImportRunFilters {
+  if (!value || typeof value !== "object") {
+    return {
+      rowIndexFrom: null,
+      rowIndexTo: null,
+      cityCode: null,
+      productId: null,
+    };
+  }
+
+  const input = value as Record<string, unknown>;
+  const parseOptionalInt = (raw: unknown): number | null => {
+    if (typeof raw !== "number" || !Number.isFinite(raw)) return null;
+    const normalized = Math.floor(raw);
+    return normalized >= 1 ? normalized : null;
+  };
+  const parseOptionalString = (raw: unknown): string | null => {
+    if (typeof raw !== "string") return null;
+    const normalized = raw.trim();
+    return normalized.length > 0 ? normalized : null;
+  };
+
+  const rowIndexFrom = parseOptionalInt(input.rowIndexFrom);
+  const parsedRowIndexTo = parseOptionalInt(input.rowIndexTo);
+
+  return {
+    rowIndexFrom,
+    rowIndexTo:
+      rowIndexFrom !== null &&
+      parsedRowIndexTo !== null &&
+      parsedRowIndexTo < rowIndexFrom
+        ? rowIndexFrom
+        : parsedRowIndexTo,
+    cityCode: parseOptionalString(input.cityCode),
+    productId: parseOptionalString(input.productId),
+  };
 }
 
 async function fetchWithTimeout(
@@ -852,6 +893,7 @@ export async function POST(req: Request) {
       MAX_TOTAL_VECTORIZE_IN_FLIGHT,
       16
     );
+    const filters = parseRunFilters(payload.filters);
     const job = await getImportJobV2(jobId);
     if (!job) {
       throw new ApiError("jobが見つかりません", 404);
@@ -865,6 +907,7 @@ export async function POST(req: Request) {
         released: 0,
         http429Count: 0,
         effectiveVectorizeConcurrency: vectorizeConcurrency,
+        targetQueueStats: await getScopedQueueStatsV2({ jobId, filters }),
       });
     }
 
@@ -900,7 +943,11 @@ export async function POST(req: Request) {
         break;
       }
 
-      const items = await claimPendingItemsV2(jobId, claimLimit);
+      const items = await claimPendingItemsV2({
+        jobId,
+        limit: claimLimit,
+        filters,
+      });
       if (items.length === 0) {
         break;
       }
@@ -1336,6 +1383,7 @@ export async function POST(req: Request) {
 
     await updateJobStatusV2(jobId);
     const nextJob = await getImportJobV2(jobId);
+    const targetQueueStats = await getScopedQueueStatsV2({ jobId, filters });
     return Response.json({
       ok: true,
       job: nextJob,
@@ -1345,6 +1393,7 @@ export async function POST(req: Request) {
       http429Count,
       effectiveVectorizeConcurrency: currentVectorizeConcurrency,
       timeBudgetMs,
+      targetQueueStats,
       itemReports: debugTimings ? itemReports.slice(-50) : undefined,
     });
   } catch (error) {
